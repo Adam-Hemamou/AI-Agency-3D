@@ -1,0 +1,23 @@
+# Dépendances
+node_modules/
+
+# Builds
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Client Prisma généré
+apps/server/src/generated/
+
+# Secrets locaux (ne jamais versionner)
+.env
+.env.*
+!.env.example
+
+# Divers
+.DS_Store
+Thumbs.db
+*.log
+.vscode/*
+!.vscode/extensions.json

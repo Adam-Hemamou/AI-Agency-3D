@@ -1,0 +1,83 @@
+// Schéma de la base de données (Prisma + MySQL).
+//
+// Les valeurs autorisées (statuts, salles, actions…) sont définies UNE SEULE FOIS
+// dans packages/shared. Les colonnes correspondantes sont donc des chaînes, et seul
+// le service de missions du serveur écrit dans ces tables, après validation.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+/// Une unité de travail confiée à une salle de l'agence.
+model Mission {
+  id                 String    @id @default(uuid(7)) @db.Char(36)
+  /// Type de mission (ex. "search_creators"). Format validé par missionTypeSchema.
+  type               String    @db.VarChar(64)
+  /// Identifiant de salle (ROOM_IDS).
+  room               String    @db.VarChar(32)
+  /// Statut (MISSION_STATUSES). Modifié uniquement via le moteur de missions.
+  status             String    @default("pending") @db.VarChar(32)
+  /// 1 (très basse) à 5 (critique).
+  priority           Int       @default(3) @db.TinyInt
+  /// Données d'entrée (objet JSON).
+  input              Json
+  /// Résultat produit (objet JSON), null tant qu'aucun résultat n'a été transmis.
+  output             Json?
+  /// Fixé à la création : la mission ne peut être terminée qu'après approbation humaine.
+  requiresValidation Boolean   @default(false) @map("requires_validation")
+  /// Dernier résultat de validation (VALIDATION_OUTCOMES).
+  validationOutcome  String?   @map("validation_outcome") @db.VarChar(32)
+  validatedAt        DateTime? @map("validated_at") @db.DateTime(3)
+  validatedBy        String?   @map("validated_by") @db.VarChar(64)
+  /// Agent responsable. La table des agents sera créée avec les agents ; pas de clé étrangère d'ici là.
+  agentId            String?   @map("agent_id") @db.VarChar(64)
+  /// Nombre de démarrages effectués (une reprise après pause n'en est pas un).
+  attemptCount       Int       @default(0) @map("attempt_count")
+  maxAttempts        Int       @default(3) @map("max_attempts")
+  /// Dernière erreur (renseignée lors d'un blocage, effacée au déblocage).
+  lastErrorCode      String?   @map("last_error_code") @db.VarChar(64)
+  lastErrorMessage   String?   @map("last_error_message") @db.Text
+  /// Incrémentée à chaque modification : protège contre les modifications concurrentes.
+  version            Int       @default(0)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.DateTime(3)
+  /// Premier démarrage.
+  startedAt          DateTime? @map("started_at") @db.DateTime(3)
+  /// Passage à un état final (terminée ou annulée).
+  finishedAt         DateTime? @map("finished_at") @db.DateTime(3)
+
+  events MissionEvent[]
+
+  @@index([status, priority])
+  @@index([room, status])
+  @@index([type])
+  @@index([createdAt])
+  @@map("missions")
+}
+
+/// Historique d'une mission. Ajout uniquement : la base refuse toute modification ou suppression.
+model MissionEvent {
+  id         Int      @id @default(autoincrement())
+  missionId  String   @map("mission_id") @db.Char(36)
+  /// MISSION_EVENT_ACTIONS ("created", "start", "approve"…).
+  action     String   @db.VarChar(48)
+  /// ACTOR_TYPES : user, agent ou system.
+  actorType  String   @map("actor_type") @db.VarChar(16)
+  actorId    String?  @map("actor_id") @db.VarChar(64)
+  fromStatus String?  @map("from_status") @db.VarChar(32)
+  toStatus   String   @map("to_status") @db.VarChar(32)
+  /// Champs modifiés : { "champ": { "from": ..., "to": ... } }.
+  changes    Json
+  reason     String?  @db.Text
+  createdAt  DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  mission Mission @relation(fields: [missionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([missionId, id])
+  @@map("mission_events")
+}

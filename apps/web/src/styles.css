@@ -1,0 +1,124 @@
+/* Jetons de design de base : réutilisés par tous les panneaux à venir. */
+:root {
+  --bg: #0f1117;
+  --surface: rgba(22, 25, 34, 0.86);
+  --border: rgba(255, 255, 255, 0.08);
+  --text: #e8eaf0;
+  --text-muted: #8b91a3;
+  --accent: #6d5efc;
+  --ok: #3ecf8e;
+  --warn: #f5a524;
+  --error: #f0506e;
+  --radius: 14px;
+  --font: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+
+  color-scheme: dark;
+  font-family: var(--font);
+  color: var(--text);
+  background: var(--bg);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+.app {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+}
+
+.app__scene {
+  position: absolute;
+  inset: 0;
+}
+
+.panel {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  width: min(340px, calc(100% - 40px));
+  padding: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.panel__eyebrow {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.panel__title {
+  margin: 0 0 16px;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.panel__note {
+  margin: 16px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.indicators {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.indicator {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 10px;
+  align-items: center;
+  font-size: 14px;
+}
+
+.indicator__label {
+  font-weight: 600;
+}
+
+.indicator__value {
+  grid-column: 2;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.dot--ok {
+  background: var(--ok);
+  box-shadow: 0 0 8px var(--ok);
+}
+.dot--warn {
+  background: var(--warn);
+  box-shadow: 0 0 8px var(--warn);
+}
+.dot--error {
+  background: var(--error);
+  box-shadow: 0 0 8px var(--error);
+}
+.dot--muted {
+  background: var(--text-muted);
+}
