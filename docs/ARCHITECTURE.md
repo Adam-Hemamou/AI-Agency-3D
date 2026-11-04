@@ -100,15 +100,18 @@ Les dossiers marqués d'une phase seront créés à ce moment-là, pas avant.
 
 Identifiants définis dans `packages/shared/src/rooms.ts`, dans l'ordre du pipeline :
 
-| Identifiant    | Salle                           | Rôle                                                |
-| -------------- | ------------------------------- | --------------------------------------------------- |
-| `prospecting`  | Salle de prospection            | Recherche de YouTubeurs                             |
-| `analysis`     | Salle d'analyse                 | Potentiel commercial et international               |
-| `director`     | Bureau du dirigeant             | Validation ou refus des prospects (humain)          |
-| `dubbing`      | Studio de doublage              | Choix d'un extrait de 30 à 60 s, échantillon HeyGen |
-| `copywriting`  | Salle de rédaction              | E-mails personnalisés avec lien vers l'échantillon  |
-| `email_review` | Salle de validation des e-mails | Vérification et approbation avant envoi (humain)    |
-| `followup`     | Salle de suivi commercial       | Réponses, opportunités, relances                    |
+| Identifiant    | Salle                           | Rôle                                                     |
+| -------------- | ------------------------------- | -------------------------------------------------------- |
+| `prospecting`  | Salle de prospection            | Recherche de YouTubeurs                                  |
+| `analysis`     | Salle d'analyse                 | Potentiel commercial et international                    |
+| `director`     | Mon bureau                      | Validation ou refus des prospects (humain)               |
+| `dubbing`      | Studio de doublage              | Choix d'un extrait de 30 à 60 s, échantillon HeyGen      |
+| `copywriting`  | Salle commerciale               | Propositions personnalisées avec lien vers l'échantillon |
+| `email_review` | Salle de validation des e-mails | Vérification et approbation avant envoi (humain)         |
+| `followup`     | Salle de suivi                  | Réponses, opportunités, relances                         |
+
+Les libellés et la fonction affichée de chaque salle (`ROOM_LABELS`, `ROOM_DESCRIPTIONS`) sont dans
+`packages/shared/src/rooms.ts`. Les identifiants n'ont pas changé depuis la phase 0.
 
 ## 6. Missions
 
@@ -222,18 +225,73 @@ Filtres de liste : plusieurs valeurs possibles (`?status=pending,blocked` ou `?s
 `sort=recent` (par défaut) ou `sort=priority`, `limit` (1 à 200, 50 par défaut) et `offset`.
 Les champs inconnus sont refusés, tant dans les requêtes que dans les filtres.
 
-## 8. Interface 3D (phases 2 à 5)
+## 8. Interface 3D
 
-| Composant                    | Rôle                                                                                     |
-| ---------------------------- | ---------------------------------------------------------------------------------------- |
-| `AgencyScene`                | Racine : lumières, environnement, assemblage                                             |
-| `IsometricCamera`            | Caméra orthographique, déplacement, zoom, recentrage sur une salle                       |
-| `Room`                       | Composant **générique** configuré par des données (les 7 salles sont des configurations) |
-| `RoomHighlight`              | Contour et éclairage au survol et à la sélection                                         |
-| Mobilier (`Desk`, `Screen`…) | Formes simples, puis modèles low-poly libres de droits (CC0)                             |
-| `AgentCharacter`             | Personnage animé selon un **état visuel**                                                |
-| `StatusBeacon`, `RoomLabel`  | Indicateurs et étiquettes ancrés dans la 3D                                              |
-| `RoomPanel`, `DashboardHUD`  | Panneaux HTML                                                                            |
+### Phase 2 ✅ : l'agence (`apps/web/src/scene`)
+
+```
+Accueil · Suivi · E-mails · Commerciale       (rangée de devant, côté caméra)
+════════════════ couloir ════════════════      entrée à l'est
+Prospection · Analyse · Mon bureau · Doublage  (rangée du fond)
+```
+
+Le flux du pipeline dessine un U : rangée du fond de gauche à droite, puis rangée de devant de droite à gauche.
+
+| Élément                                           | Rôle                                                                                                      |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `layout/agencyLayout.ts`                          | Plan (données pures) : dimensions, position des salles, portes, murs hauts et bas                         |
+| `rooms/roomDesigns.ts`                            | Aménagement de chaque salle (données pures) : couleurs, type de sol, mobilier, objets muraux, pictogramme |
+| `props/catalog.ts`                                | Emprise au sol et hauteur de chaque meuble                                                                |
+| `props/*.tsx`                                     | Une trentaine de meubles low-poly construits à partir de formes simples (aucun fichier 3D externe)        |
+| `props/registry.tsx`                              | Associe chaque type de meuble à son composant ; le typage interdit d'en oublier un                        |
+| `rooms/Room.tsx`, `rooms/RoomShell.tsx`           | Salle **générique** : sol, murs avec porte, mobilier, zone de survol et de clic, surbrillance             |
+| `layout/AgencyGrounds.tsx`                        | Socle façon maquette, couloir, décor, abords extérieurs                                                   |
+| `camera/AgencyCamera.tsx`, `camera/cameraMath.ts` | Caméra isométrique orthographique, cadrages calculés                                                      |
+| `labels/*`                                        | Étiquettes HTML des salles, repositionnées par la scène à chaque image                                    |
+| `performance/*`                                   | Fusion des objets immobiles et ombres calculées une seule fois                                            |
+
+**Murs** : seuls les murs du pourtour nord et ouest sont hauts (1,5). Tous les autres font 0,5, pour voir
+l'intérieur des pièces. Les objets muraux (écrans, tableaux…) ne sont posés que sur les murs hauts ; ailleurs,
+on utilise du mobilier sur pied (tableau blanc mobile, tableau de suivi…).
+
+**Cohérence vérifiée automatiquement** (`roomDesigns.test.ts`) :
+
+- aucun meuble ne déborde des murs ni n'en chevauche un autre ;
+- l'accès aux portes reste libre ;
+- les objets muraux sont sur des murs hauts, sans se chevaucher ;
+- aucun meuble haut ne traverse un objet mural.
+
+**Interactions** : survol → surbrillance de la salle (sol teinté, liseré lumineux, étiquette agrandie, curseur
+main) ; clic → sélection, cadrage de la caméra et panneau ; Échap ou ✕ → fermeture et retour à la vue d'ensemble.
+Un glisser de plus de 6 px n'est pas un clic. La liste des salles (en bas à gauche) offre les mêmes actions.
+
+**Caméra** : glisser = se déplacer sur le sol, molette = zoomer vers le curseur, clic droit = pivoter
+(±35° autour de l'angle isométrique). Le déplacement est borné à l'agence et le zoom est limité.
+La vue d'ensemble et le cadrage d'une salle tiennent compte de la place prise par la liste et par le panneau.
+
+**Connexion au CRM** : le panneau appelle `GET /api/missions?room=…&sort=priority&limit=50` à chaque ouverture.
+Il affiche le nom et la fonction de la salle, le nombre total de missions, la répartition par statut et la liste
+(type, statut, priorité, validation requise, date). Les états de chargement, d'erreur (avec « Réessayer ») et
+de salle vide sont prévus. Aucune donnée de mission n'est conservée côté interface : l'API reste la source de vérité.
+L'état partagé entre la 3D et les panneaux (`stores/agencyStore.ts`, Zustand) se limite à la salle survolée
+et à la salle sélectionnée.
+
+**Performance** :
+
+- rendu « à la demande » : aucune image n'est calculée quand rien ne bouge ;
+- les objets immobiles de chaque salle sont fusionnés en un maillage par matériau, ce qui fait passer de
+  ~2 000 à ~300 appels de dessin ;
+- un matériau par couleur pour toute la scène ;
+- ombres calculées une seule fois ;
+- ~15 000 triangles, aucune texture.
+
+### Phases suivantes
+
+| Composant        | Phase | Rôle                                               |
+| ---------------- | ----- | -------------------------------------------------- |
+| `StatusBeacon`   | 3     | Indicateurs 3D liés aux statuts réels des missions |
+| `DashboardHUD`   | 3     | Tableau de bord global                             |
+| `AgentCharacter` | 5     | Personnage animé selon un **état visuel**          |
 
 Correspondance statut → état visuel de l'agent : `in_progress` → `working`, `awaiting_validation` → `waiting`,
 `paused` → `paused`, `blocked` → `alert`, sinon `idle`. Une seule fonction fait cette correspondance :
@@ -284,16 +342,16 @@ refusent de démarrer. La base de développement n'est jamais touchée. On peut 
 
 ## 11. Plan de développement
 
-| Phase                     | Contenu                                                                                 | État        |
-| ------------------------- | --------------------------------------------------------------------------------------- | ----------- |
-| **0. Fondations**         | Monorepo, Docker MySQL, Prisma, paquet partagé, API santé, page de test 3D, tests, lint | ✅ Terminée |
-| **1. Moteur de missions** | Tables missions et historique, machine à états, API REST, tests                         | ✅ Terminée |
-| 2. Agence 3D statique     | Sol, 7 salles, mobilier simple, caméra, sélection                                       | À faire     |
-| 3. Panneaux connectés     | Panneaux de missions, tableau de bord, WebSocket, indicateurs                           | À faire     |
-| 4. Pipeline simulé        | Les 7 salles enchaînées avec des fournisseurs simulés, validations humaines             | À faire     |
-| 5. Agents vivants         | Animations liées aux statuts, déplacements                                              | À faire     |
-| 6. Intégrations réelles   | IA → YouTube (lecture) → HeyGen → e-mails (en dernier), via n8n                         | À faire     |
-| 7. Application de bureau  | Coque Electron                                                                          | À faire     |
+| Phase                     | Contenu                                                                                 | État         |
+| ------------------------- | --------------------------------------------------------------------------------------- | ------------ |
+| **0. Fondations**         | Monorepo, Docker MySQL, Prisma, paquet partagé, API santé, page de test 3D, tests, lint | ✅ Terminée  |
+| **1. Moteur de missions** | Tables missions et historique, machine à états, API REST, tests                         | ✅ Terminée  |
+| **2. Agence 3D**          | 7 salles aménagées, caméra, survol, sélection, panneau relié à l'API                    | ✅ À valider |
+| 3. Panneaux connectés     | Panneaux de missions, tableau de bord, WebSocket, indicateurs                           | À faire      |
+| 4. Pipeline simulé        | Les 7 salles enchaînées avec des fournisseurs simulés, validations humaines             | À faire      |
+| 5. Agents vivants         | Animations liées aux statuts, déplacements                                              | À faire      |
+| 6. Intégrations réelles   | IA → YouTube (lecture) → HeyGen → e-mails (en dernier), via n8n                         | À faire      |
+| 7. Application de bureau  | Coque Electron                                                                          | À faire      |
 
 Chaque phase est validée avant de passer à la suivante.
 
@@ -312,19 +370,25 @@ Chaque phase est validée avant de passer à la suivante.
 
 ## 13. Journal des décisions techniques
 
-| Date       | Décision                                                                                                                                                           |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 29/10/2026 | **TypeScript 6.0** et non 7.0 : l'outil de lint (typescript-eslint) ne prend pas encore en charge TypeScript 7.                                                    |
-| 29/10/2026 | **Prisma 7.10** (dernière version stable) et non 8.0, encore en préversion. Prisma 7 impose un adaptateur de pilote : `@prisma/adapter-mariadb`, compatible MySQL. |
-| 29/10/2026 | Le serveur est exécuté directement en TypeScript avec **tsx** (pas d'étape de compilation). La compilation sera ajoutée en phase 7 pour Electron.                  |
-| 29/10/2026 | Le paquet `@agency/shared` est consommé en source TypeScript, sans étape de build.                                                                                 |
-| 29/10/2026 | **n8n** n'est pas encore dans `docker-compose.yml` : il sera ajouté en phase 6, quand il servira.                                                                  |
-| 29/10/2026 | L'utilisateur MySQL `agency` a tous les droits **en local** : Prisma Migrate doit pouvoir créer une base temporaire de comparaison.                                |
-| 29/10/2026 | Phase 1 : les sept statuts sont conservés. Le résultat de validation et les tentatives sont des **champs** de la mission, pas de nouveaux statuts.                 |
-| 29/10/2026 | Les règles du cycle de vie sont dans `packages/shared` (source unique). Le serveur les applique ; l'interface pourra s'en servir pour l'affichage.                 |
-| 29/10/2026 | Colonnes `status` / `room` / `action` en chaînes plutôt qu'en enums Prisma, pour ne pas dupliquer les listes du paquet partagé.                                    |
-| 29/10/2026 | Ajout de `pending → blocked` (absent du plan initial) : une mission peut être bloquée avant son démarrage (données manquantes).                                    |
-| 29/10/2026 | Refus d'un résultat = `cancelled` + `validationOutcome = rejected` ; demande de modifications = retour en `in_progress`.                                           |
-| 29/10/2026 | Historique protégé par des déclencheurs MySQL (aucune modification ni suppression possible).                                                                       |
-| 29/10/2026 | Contrôle de concurrence optimiste par `version` plutôt que par verrous : simple, et suffisant pour un usage mono-utilisateur.                                      |
-| 29/10/2026 | Prisma 7 ne régénère plus le client après une migration : `npm run db:migrate` enchaîne désormais `migrate dev` et `generate`.                                     |
+| Date       | Décision                                                                                                                                                                                                          |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 29/10/2026 | **TypeScript 6.0** et non 7.0 : l'outil de lint (typescript-eslint) ne prend pas encore en charge TypeScript 7.                                                                                                   |
+| 29/10/2026 | **Prisma 7.10** (dernière version stable) et non 8.0, encore en préversion. Prisma 7 impose un adaptateur de pilote : `@prisma/adapter-mariadb`, compatible MySQL.                                                |
+| 29/10/2026 | Le serveur est exécuté directement en TypeScript avec **tsx** (pas d'étape de compilation). La compilation sera ajoutée en phase 7 pour Electron.                                                                 |
+| 29/10/2026 | Le paquet `@agency/shared` est consommé en source TypeScript, sans étape de build.                                                                                                                                |
+| 29/10/2026 | **n8n** n'est pas encore dans `docker-compose.yml` : il sera ajouté en phase 6, quand il servira.                                                                                                                 |
+| 29/10/2026 | L'utilisateur MySQL `agency` a tous les droits **en local** : Prisma Migrate doit pouvoir créer une base temporaire de comparaison.                                                                               |
+| 29/10/2026 | Phase 1 : les sept statuts sont conservés. Le résultat de validation et les tentatives sont des **champs** de la mission, pas de nouveaux statuts.                                                                |
+| 29/10/2026 | Les règles du cycle de vie sont dans `packages/shared` (source unique). Le serveur les applique ; l'interface pourra s'en servir pour l'affichage.                                                                |
+| 29/10/2026 | Colonnes `status` / `room` / `action` en chaînes plutôt qu'en enums Prisma, pour ne pas dupliquer les listes du paquet partagé.                                                                                   |
+| 29/10/2026 | Ajout de `pending → blocked` (absent du plan initial) : une mission peut être bloquée avant son démarrage (données manquantes).                                                                                   |
+| 29/10/2026 | Refus d'un résultat = `cancelled` + `validationOutcome = rejected` ; demande de modifications = retour en `in_progress`.                                                                                          |
+| 29/10/2026 | Historique protégé par des déclencheurs MySQL (aucune modification ni suppression possible).                                                                                                                      |
+| 29/10/2026 | Contrôle de concurrence optimiste par `version` plutôt que par verrous : simple, et suffisant pour un usage mono-utilisateur.                                                                                     |
+| 29/10/2026 | Prisma 7 ne régénère plus le client après une migration : `npm run db:migrate` enchaîne désormais `migrate dev` et `generate`.                                                                                    |
+| 29/10/2026 | Phase 2 : libellés alignés sur le cahier des charges (« Mon bureau », « Salle commerciale », « Salle de suivi ») ; identifiants inchangés.                                                                        |
+| 29/10/2026 | Mobilier construit en formes simples dans le code plutôt qu'en modèles 3D téléchargés : aucun fichier lourd, couleurs maîtrisées, aménagement vérifiable par des tests.                                           |
+| 29/10/2026 | Étiquettes en HTML maison plutôt que le composant `Html` de drei, qui perdait une étiquette avec React 19 en mode développement.                                                                                  |
+| 29/10/2026 | Caméra : `camera-controls` (fourni avec drei) avec `SCREEN_PAN` (déplacement sur le sol) ; cadrages calculés par `cameraMath.ts`, car son `fitToBox` réaligne la caméra sur les axes et casse la vue isométrique. |
+| 29/10/2026 | Ombres en `PCFShadowMap` (`shadows="percentage"`) : `PCFSoftShadowMap` a été retiré de Three.js.                                                                                                                  |
+| 29/10/2026 | Outil de test `window.__agencyProbe`, présent **uniquement en développement**, pour les tests automatisés dans le navigateur.                                                                                     |

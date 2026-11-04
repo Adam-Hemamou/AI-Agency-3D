@@ -1,21 +1,24 @@
-/* Jetons de design de base : réutilisés par tous les panneaux à venir. */
+/* Jetons de design : ambiance chaleureuse et claire, cohérente avec la scène 3D. */
 :root {
-  --bg: #0f1117;
-  --surface: rgba(22, 25, 34, 0.86);
-  --border: rgba(255, 255, 255, 0.08);
-  --text: #e8eaf0;
-  --text-muted: #8b91a3;
-  --accent: #6d5efc;
-  --ok: #3ecf8e;
-  --warn: #f5a524;
-  --error: #f0506e;
-  --radius: 14px;
+  --bg-top: #f7f1e8;
+  --bg-bottom: #e7ddcf;
+  --surface: rgba(255, 252, 247, 0.92);
+  --surface-solid: #fffcf7;
+  --border: rgba(74, 58, 40, 0.12);
+  --text: #2f2a24;
+  --text-muted: #7b7165;
+  --accent: #c7714d;
+  --ok: #2f9e5b;
+  --warn: #d48806;
+  --error: #d64545;
+  --radius: 16px;
+  --shadow: 0 10px 30px rgba(74, 58, 40, 0.14);
   --font: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --panel-width: 420px;
 
-  color-scheme: dark;
+  color-scheme: light;
   font-family: var(--font);
   color: var(--text);
-  background: var(--bg);
 }
 
 * {
@@ -29,6 +32,15 @@ body,
   height: 100%;
 }
 
+body {
+  background: radial-gradient(ellipse at 50% 35%, var(--bg-top) 0%, var(--bg-bottom) 100%);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
 .app {
   position: relative;
   height: 100%;
@@ -40,41 +52,490 @@ body,
   inset: 0;
 }
 
-.panel {
+/* ---------- Cartes du HUD ---------- */
+.hud-card {
   position: absolute;
-  top: 20px;
-  left: 20px;
-  width: min(340px, calc(100% - 40px));
-  padding: 20px;
+  z-index: 30;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  backdrop-filter: blur(12px);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(10px);
 }
 
-.panel__eyebrow {
-  margin: 0 0 4px;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--accent);
+.hud-brand {
+  top: 16px;
+  left: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
 }
 
-.panel__title {
-  margin: 0 0 16px;
-  font-size: 22px;
+.hud-brand__logo {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #e08a5f, #b85a3a);
+  color: white;
+  font-size: 18px;
+}
+
+.hud-brand__title {
+  margin: 0;
+  font-size: 16px;
   font-weight: 700;
 }
 
-.panel__note {
-  margin: 16px 0 0;
-  font-size: 13px;
-  line-height: 1.5;
+.hud-brand__subtitle {
+  margin: 0;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
+.hud-health {
+  position: relative;
+  margin-left: 8px;
+  font-size: 13px;
+}
+
+.hud-health summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(74, 58, 40, 0.06);
+  cursor: pointer;
+  list-style: none;
+}
+
+.hud-health summary::-webkit-details-marker {
+  display: none;
+}
+
+.hud-health[open] .indicators {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 260px;
+  padding: 12px;
+  background: var(--surface-solid);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.hud-rooms {
+  left: 16px;
+  bottom: 16px;
+  width: 260px;
+  padding: 12px;
+}
+
+.hud-rooms__title {
+  margin: 2px 6px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.hud-rooms ul {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hud-room {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.hud-room:hover,
+.hud-room--hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.hud-room--active {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  font-weight: 600;
+}
+
+.hud-room:focus-visible,
+.button:focus-visible,
+.icon-button:focus-visible,
+.link-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.hud-room__step {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.hud-room__icon {
+  width: 18px;
+  text-align: center;
+}
+
+.hud-rooms__overview {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.hud-help {
+  position: absolute;
+  z-index: 30;
+  bottom: 16px;
+  left: 50%;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px 14px;
+  margin: 0;
+  padding: 8px 14px;
+  transform: translateX(-50%);
+  background: rgba(47, 42, 36, 0.72);
+  border-radius: 999px;
+  color: #fff;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+/* ---------- Étiquettes des salles (positionnées par la scène) ---------- */
+.room-labels {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.room-label-anchor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  visibility: hidden;
+  will-change: transform;
+}
+
+.room-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  background: rgba(255, 252, 247, 0.94);
+  border: 2px solid var(--accent);
+  box-shadow: 0 4px 12px rgba(74, 58, 40, 0.18);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  user-select: none;
+  transition:
+    transform 0.15s,
+    background 0.15s,
+    color 0.15s;
+}
+
+.room-label--muted {
+  border-color: transparent;
+  color: var(--text-muted);
+  font-weight: 500;
+  opacity: 0.85;
+}
+
+.room-label--hover {
+  transform: translateY(-4px) scale(1.06);
+}
+
+.room-label--selected {
+  background: var(--accent);
+  color: white;
+  transform: translateY(-4px) scale(1.08);
+}
+
+.room-label__icon {
+  font-size: 14px;
+}
+
+/* ---------- Panneau de salle ---------- */
+.room-panel {
+  position: absolute;
+  z-index: 40;
+  top: 16px;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  width: var(--panel-width);
+  background: var(--surface-solid);
+  border: 1px solid var(--border);
+  border-top: 5px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  animation: panel-in 0.22s ease-out;
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+
+.room-panel__header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 18px 12px;
+}
+
+.room-panel__icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 16%, white);
+  font-size: 22px;
+}
+
+.room-panel__titles {
+  flex: 1;
+}
+
+.room-panel__title {
+  margin: 0 0 4px;
+  font-size: 19px;
+}
+
+.room-panel__description {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.room-panel__count {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0 18px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.room-panel__count-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.room-panel__count-label {
+  flex: 1;
+  color: var(--text-muted);
+}
+
+.room-panel__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 18px 18px;
+}
+
+.room-panel__state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 32px 0;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.room-panel__state--error {
+  color: var(--error);
+}
+
+.room-panel__empty {
+  padding: 36px 12px;
+  text-align: center;
+}
+
+.room-panel__empty-icon {
+  font-size: 40px;
+}
+
+.room-panel__empty-title {
+  margin: 10px 0 4px;
+  font-weight: 600;
+}
+
+.room-panel__hint {
+  margin: 6px 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.status-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.status-summary li {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12.5px;
+}
+
+.mission-list {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mission-item {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.mission-item__main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mission-item__type {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.mission-item__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.mission-item__tag {
+  color: #a0610a;
+  font-weight: 600;
+}
+
+.status-badge {
+  flex: none;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* ---------- Boutons ---------- */
+.button {
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-solid);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.button--ghost {
+  background: rgba(74, 58, 40, 0.05);
+}
+
+.button:hover {
+  background: rgba(74, 58, 40, 0.1);
+}
+
+.icon-button {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(74, 58, 40, 0.06);
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.icon-button:hover {
+  background: rgba(74, 58, 40, 0.14);
+}
+
+.link-button {
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.link-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.spinner {
+  width: 22px;
+  height: 22px;
+  border: 3px solid rgba(74, 58, 40, 0.15);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------- Indicateurs d'état (phase 0) ---------- */
 .indicators {
   display: grid;
   gap: 10px;
@@ -88,7 +549,7 @@ body,
   grid-template-columns: auto 1fr;
   column-gap: 10px;
   align-items: center;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .indicator__label {
@@ -97,11 +558,12 @@ body,
 
 .indicator__value {
   grid-column: 2;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
 .dot {
+  display: inline-block;
   width: 9px;
   height: 9px;
   border-radius: 50%;
@@ -109,16 +571,48 @@ body,
 
 .dot--ok {
   background: var(--ok);
-  box-shadow: 0 0 8px var(--ok);
+  box-shadow: 0 0 6px var(--ok);
 }
 .dot--warn {
   background: var(--warn);
-  box-shadow: 0 0 8px var(--warn);
+  box-shadow: 0 0 6px var(--warn);
 }
 .dot--error {
   background: var(--error);
-  box-shadow: 0 0 8px var(--error);
+  box-shadow: 0 0 6px var(--error);
 }
 .dot--muted {
   background: var(--text-muted);
+}
+
+/* ---------- Écrans étroits : le panneau passe en bas ---------- */
+@media (max-width: 899px) {
+  .room-panel {
+    top: auto;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    width: auto;
+    height: 55%;
+  }
+
+  .hud-rooms,
+  .hud-help {
+    display: none;
+  }
+
+  .hud-brand {
+    top: 8px;
+    left: 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .room-panel,
+  .spinner,
+  .room-label,
+  .hud-room {
+    animation: none;
+    transition: none;
+  }
 }

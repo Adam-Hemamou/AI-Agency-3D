@@ -11,6 +11,13 @@ export default defineConfig({
       '/api': 'http://127.0.0.1:3001',
     },
   },
+  // Même proxy pour l'aperçu du build de production (npm run preview).
+  preview: {
+    port: 4173,
+    proxy: {
+      '/api': 'http://127.0.0.1:3001',
+    },
+  },
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],

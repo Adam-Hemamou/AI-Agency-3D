@@ -3,6 +3,7 @@ import {
   FINAL_MISSION_STATUSES,
   MISSION_STATUSES,
   MISSION_STATUS_LABELS,
+  ROOM_DESCRIPTIONS,
   ROOM_IDS,
   ROOM_LABELS,
   healthResponseSchema,
@@ -38,6 +39,12 @@ describe('salles', () => {
     expect(ROOM_IDS).toHaveLength(7);
     for (const room of ROOM_IDS) {
       expect(ROOM_LABELS[room]).toBeTruthy();
+    }
+  });
+
+  it('décrit la fonction de chaque salle', () => {
+    for (const room of ROOM_IDS) {
+      expect(ROOM_DESCRIPTIONS[room].length).toBeGreaterThan(10);
     }
   });
 

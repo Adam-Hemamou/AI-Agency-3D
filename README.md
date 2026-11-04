@@ -3,7 +3,7 @@
 Agence commerciale virtuelle en 3D pilotant des agents IA : prospection de créateurs YouTube,
 analyse de leur potentiel international et proposition de doublage vidéo (HeyGen).
 
-**État : phases 0 (fondations) et 1 (moteur de missions) terminées.** Voir [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+**État : phases 0 (fondations) et 1 (moteur de missions) terminées ; phase 2 (agence 3D) en cours de validation.** Voir [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 > Prototype : aucune action externe réelle n'est effectuée (`MODE_SIMULATION=true`).
 
@@ -28,7 +28,7 @@ npm run db:up
 npm run dev
 ```
 
-Ouvrir ensuite **http://localhost:5173**. Le panneau doit afficher trois voyants verts :
+Ouvrir ensuite **http://localhost:5173** : l’agence 3D s’affiche. Le bouton « Système » (en haut à gauche) doit afficher trois voyants verts :
 API en ligne, base de données connectée, mode simulation actif.
 
 ## Commandes utiles
@@ -36,6 +36,7 @@ API en ligne, base de données connectée, mode simulation actif.
 | Commande                            | Effet                                              |
 | ----------------------------------- | -------------------------------------------------- |
 | `npm run dev`                       | Lance l'API (port 3001) et l'interface (port 5173) |
+| `npm run preview -w @agency/web`    | Aperçu du build de production (port 4173)          |
 | `npm run check`                     | Vérifie les types, le lint et les tests            |
 | `npm test`                          | Lance tous les tests (MySQL doit être démarré)     |
 | `npm run lint` / `npm run format`   | Lint / formatage automatique                       |
@@ -65,6 +66,13 @@ API en ligne, base de données connectée, mode simulation actif.
   distincte de la base de développement). Démarrer Docker Desktop puis `npm run db:up`. Sans base :
   `npm run test:unit -w @agency/server`.
 - **Après avoir récupéré une nouvelle migration** : `npm run db:migrate` (applique les migrations et régénère le client Prisma).
+
+## Utiliser l’agence
+
+- **Survoler** une salle la met en évidence ; **cliquer** l’ouvre et affiche ses missions.
+- **Glisser** pour se déplacer, **molette** pour zoomer, **clic droit** pour pivoter légèrement.
+- **Échap** ou **✕** ferme le panneau ; **Vue d’ensemble** recadre toute l’agence.
+- La liste des salles, en bas à gauche, permet les mêmes actions.
 
 ## API
 
