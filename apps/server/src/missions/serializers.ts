@@ -1,5 +1,6 @@
 import {
   ACTOR_TYPES,
+  PROSPECT_STAGES,
   MISSION_EVENT_ACTIONS,
   VALIDATION_OUTCOMES,
   isMissionStatus,
@@ -10,6 +11,8 @@ import {
   type MissionEvent,
   type MissionEventAction,
   type MissionStatus,
+  type ProspectStage,
+  type ProspectSummary,
   type RoomId,
   type ValidationOutcome,
 } from '@agency/shared';
@@ -65,6 +68,7 @@ export function toMissionDto(row: MissionRow): Mission {
     validatedAt: iso(row.validatedAt),
     validatedBy: row.validatedBy,
     agentId: row.agentId,
+    prospectId: row.prospectId,
     attemptCount: row.attemptCount,
     maxAttempts: row.maxAttempts,
     lastErrorCode: row.lastErrorCode,
@@ -96,3 +100,30 @@ export function toMissionEventDto(row: MissionEventRow): MissionEvent {
     createdAt: row.createdAt.toISOString(),
   };
 }
+
+/** Colonnes nécessaires au résumé d'un prospect. */
+export const PROSPECT_SUMMARY_SELECT = {
+  id: true,
+  reference: true,
+  creatorName: true,
+  channelName: true,
+  stage: true,
+} as const;
+
+export function toProspectSummaryDto(row: {
+  id: string;
+  reference: string;
+  creatorName: string;
+  channelName: string;
+  stage: string;
+}): ProspectSummary {
+  return {
+    id: row.id,
+    reference: row.reference,
+    creatorName: row.creatorName,
+    channelName: row.channelName,
+    stage: assertOneOf<ProspectStage>(row.stage, PROSPECT_STAGES, 'prospects.stage'),
+  };
+}
+
+export { assertOneOf };

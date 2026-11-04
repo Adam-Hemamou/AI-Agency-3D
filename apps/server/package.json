@@ -16,7 +16,9 @@
     "postinstall": "prisma generate",
     "test:unit": "vitest run",
     "test:integration": "vitest run -c vitest.integration.config.ts",
-    "db:deploy": "prisma migrate deploy"
+    "db:deploy": "prisma migrate deploy",
+    "dev:demo": "tsx src/demo/devServer.ts",
+    "demo:setup": "tsx src/demo/setupDemo.ts"
   },
   "dependencies": {
     "@agency/shared": "*",

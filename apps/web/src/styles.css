@@ -427,10 +427,60 @@ button {
 }
 
 .mission-item {
+  display: block;
+  width: 100%;
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: #fff;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s,
+    transform 0.15s;
+}
+
+.mission-item:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  box-shadow: 0 4px 14px rgba(74, 58, 40, 0.1);
+  transform: translateY(-1px);
+}
+
+.mission-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.mission-item--active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, #fff);
+  box-shadow: inset 4px 0 0 var(--accent);
+}
+
+.mission-item__prospect {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 6px;
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.mission-item__prospect--none {
+  font-style: italic;
+}
+
+.mission-item__ref {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(74, 58, 40, 0.07);
+  color: var(--text);
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .mission-item__main {
@@ -441,8 +491,7 @@ button {
 }
 
 .mission-item__type {
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   overflow-wrap: anywhere;
 }

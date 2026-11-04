@@ -54,6 +54,9 @@ export function HealthStatus({ health, isLoading, error }: HealthStatusProps) {
         value={health.simulationMode ? 'Actif — aucune action externe' : 'DÉSACTIVÉ'}
         tone={health.simulationMode ? 'ok' : 'warn'}
       />
+      {health.demoMode && (
+        <Indicator label="Données" value="Démonstration (fictives)" tone="warn" />
+      )}
     </ul>
   );
 }

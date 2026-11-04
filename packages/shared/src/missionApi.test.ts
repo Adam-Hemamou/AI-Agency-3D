@@ -17,6 +17,7 @@ describe('création de mission', () => {
       input: {},
       requiresValidation: false,
       agentId: null,
+      prospectId: null,
       maxAttempts: 3,
     });
   });

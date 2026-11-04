@@ -28,8 +28,18 @@ export async function resetDatabase(): Promise<void> {
   });
   try {
     await connection.query('SET FOREIGN_KEY_CHECKS = 0');
-    await connection.query('TRUNCATE TABLE mission_events');
-    await connection.query('TRUNCATE TABLE missions');
+    for (const table of [
+      'mission_events',
+      'missions',
+      'prospect_events',
+      'prospect_messages',
+      'prospect_decisions',
+      'prospect_productions',
+      'prospect_analyses',
+      'prospects',
+    ]) {
+      await connection.query(`TRUNCATE TABLE \`${table}\``);
+    }
     await connection.query('SET FOREIGN_KEY_CHECKS = 1');
   } finally {
     await connection.end();

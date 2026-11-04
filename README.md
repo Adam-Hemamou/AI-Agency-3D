@@ -44,6 +44,8 @@ API en ligne, base de données connectée, mode simulation actif.
 | `npm run db:logs`                   | Journaux MySQL                                     |
 | `npm run db:migrate`                | Crée et applique une migration Prisma              |
 | `npm run db:studio`                 | Explorateur visuel de la base                      |
+| `npm run demo:setup`                | (Re)crée la base de démonstration fictive          |
+| `npm run dev:demo`                  | Démo : API (port 3101) et interface (port 5174)    |
 
 ## Organisation
 
@@ -67,15 +69,39 @@ API en ligne, base de données connectée, mode simulation actif.
   `npm run test:unit -w @agency/server`.
 - **Après avoir récupéré une nouvelle migration** : `npm run db:migrate` (applique les migrations et régénère le client Prisma).
 
+## Démonstration du CRM (données fictives)
+
+Pour découvrir le CRM avec des dossiers déjà remplis, sans toucher à vos vraies données :
+
+```bash
+npm run demo:setup   # crée ai_agency_demo et y charge 13 prospects fictifs
+npm run dev:demo     # puis ouvrir http://localhost:5174
+```
+
+- La démo utilise une **base séparée** (`ai_agency_demo`) et ses **propres ports** : elle peut tourner en
+  même temps que l’application réelle. Toute base dont le nom ne finit pas par `_demo` est refusée.
+- Tout est fictif (créateurs, statistiques, adresses en `.example`). Aucun e-mail, aucun doublage et
+  aucune API payante ne sont déclenchés : les envois sont **simulés** et signalés comme tels.
+- `npm run demo:setup` remet la démo dans son état initial à tout moment.
+
 ## Utiliser l’agence
 
 - **Survoler** une salle la met en évidence ; **cliquer** l’ouvre et affiche ses missions.
 - **Glisser** pour se déplacer, **molette** pour zoomer, **clic droit** pour pivoter légèrement.
 - **Échap** ou **✕** ferme le panneau ; **Vue d’ensemble** recadre toute l’agence.
 - La liste des salles, en bas à gauche, permet les mêmes actions.
+- **Cliquer une mission** ouvre le **dossier du prospect** au centre, sur la section de la salle
+  (Analyse, Validation, Doublage, Commercial, E-mails, Suivi…). Toutes les sections restent accessibles
+  par les onglets. **Échap** ou **✕** ferme le dossier sans fermer le panneau.
+- Un prospect garde **un seul dossier** d’une salle à l’autre : chaque mission y renvoie.
 
 ## API
 
 Routes disponibles (détail dans [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#7-bis-api-des-missions)) :
 `GET /api/health`, `POST|GET /api/missions`, `GET /api/missions/:id`, `GET /api/missions/:id/events`,
 `POST /api/missions/:id/transitions`, `POST /api/missions/:id/validation`.
+
+CRM : `GET /api/prospects`, `GET /api/prospects/:id/dossier`, `POST /api/prospects/:id/decisions`,
+`POST /api/prospects/:id/email/decisions`, `POST /api/prospects/:id/email/drafts`,
+`POST /api/prospects/:id/email/simulated-send`, `POST /api/prospects/:id/replies`,
+`POST /api/prospects/:id/followups`, `PATCH /api/prospects/:id/followup`, `POST /api/prospects/:id/notes`.

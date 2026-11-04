@@ -50,13 +50,17 @@ model Mission {
   startedAt          DateTime? @map("started_at") @db.DateTime(3)
   /// Passage à un état final (terminée ou annulée).
   finishedAt         DateTime? @map("finished_at") @db.DateTime(3)
+  /// Prospect concerné (dossier central). Null pour les missions sans prospect.
+  prospectId         String?   @map("prospect_id") @db.Char(36)
 
-  events MissionEvent[]
+  events   MissionEvent[]
+  prospect Prospect?      @relation(fields: [prospectId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@index([status, priority])
   @@index([room, status])
   @@index([type])
   @@index([createdAt])
+  @@index([prospectId])
   @@map("missions")
 }
 
@@ -80,4 +84,176 @@ model MissionEvent {
 
   @@index([missionId, id])
   @@map("mission_events")
+}
+
+// ---------------------------------------------------------------------------
+// CRM : un dossier unique par prospect, enrichi salle après salle.
+// Seul le service des prospects écrit dans ces tables.
+// ---------------------------------------------------------------------------
+
+/// Le créateur ou l'entreprise prospecté. Son identité ne change pas d'une salle à l'autre.
+model Prospect {
+  id                 String    @id @default(uuid(7)) @db.Char(36)
+  /// Numéro de dossier lisible (ex. "P-2026-0001").
+  reference          String    @unique @db.VarChar(20)
+  creatorName        String    @map("creator_name") @db.VarChar(120)
+  channelName        String    @map("channel_name") @db.VarChar(160)
+  channelHandle      String?   @map("channel_handle") @db.VarChar(120)
+  /// Identifiant YouTube de la chaîne : empêche de créer deux dossiers pour la même chaîne.
+  youtubeChannelId   String?   @unique @map("youtube_channel_id") @db.VarChar(64)
+  channelUrl         String?   @map("channel_url") @db.VarChar(500)
+  avatarUrl          String?   @map("avatar_url") @db.VarChar(500)
+  category           String?   @db.VarChar(80)
+  description        String?   @db.Text
+  country            String?   @db.VarChar(80)
+  /// Statistiques facultatives : toujours accompagnées de leur source et de leur date de relevé.
+  subscriberCount    Int?      @map("subscriber_count")
+  viewCount          BigInt?   @map("view_count")
+  videoCount         Int?      @map("video_count")
+  statsSource        String?   @map("stats_source") @db.VarChar(200)
+  statsUpdatedAt     DateTime? @map("stats_updated_at") @db.DateTime(3)
+  contactEmail       String?   @map("contact_email") @db.VarChar(254)
+  contactName        String?   @map("contact_name") @db.VarChar(120)
+  contactSource      String?   @map("contact_source") @db.VarChar(200)
+  /// Contexte de la découverte et qualification initiale (schéma discoverySchema).
+  discovery          Json?
+  /// Étape du parcours (PROSPECT_STAGES).
+  stage              String    @default("prospecting") @db.VarChar(32)
+  /// Statut de la relation commerciale (RELATIONSHIP_STATUSES), à partir du premier envoi.
+  relationshipStatus String?   @map("relationship_status") @db.VarChar(32)
+  priority           Int       @default(3) @db.TinyInt
+  /// Le prospect a refusé ou demandé à ne plus être contacté : toute relance est bloquée.
+  doNotContact       Boolean   @default(false) @map("do_not_contact")
+  doNotContactReason String?   @map("do_not_contact_reason") @db.VarChar(500)
+  nextAction         String?   @map("next_action") @db.VarChar(500)
+  nextActionAt       DateTime? @map("next_action_at") @db.DateTime(3)
+  /// Données fictives de démonstration.
+  isDemo             Boolean   @default(false) @map("is_demo")
+  version            Int       @default(0)
+  discoveredAt       DateTime  @map("discovered_at") @db.DateTime(3)
+  lastActivityAt     DateTime  @map("last_activity_at") @db.DateTime(3)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.DateTime(3)
+
+  missions    Mission[]
+  analyses    ProspectAnalysis[]
+  productions ProspectProduction[]
+  decisions   ProspectDecision[]
+  messages    ProspectMessage[]
+  events      ProspectEvent[]
+
+  @@index([stage, priority])
+  @@index([lastActivityAt])
+  @@map("prospects")
+}
+
+/// Résultat d'une analyse. Jamais modifié : une nouvelle analyse crée une nouvelle version.
+model ProspectAnalysis {
+  id            String   @id @default(uuid(7)) @db.Char(36)
+  prospectId    String   @map("prospect_id") @db.Char(36)
+  missionId     String?  @map("mission_id") @db.Char(36)
+  version       Int
+  summary       String   @db.Text
+  conclusion    String   @db.Text
+  score         Int?     @db.TinyInt
+  scoreCriteria Json     @map("score_criteria")
+  priority      Int      @db.TinyInt
+  /// Détail de l'analyse (schéma analysisContentSchema).
+  content       Json
+  sources       Json
+  actorType     String   @map("actor_type") @db.VarChar(16)
+  actorId       String?  @map("actor_id") @db.VarChar(64)
+  createdAt     DateTime @map("created_at") @db.DateTime(3)
+
+  prospect Prospect @relation(fields: [prospectId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([prospectId, version])
+  @@map("prospect_analyses")
+}
+
+/// Élément produit pour le prospect : extrait, doublage, proposition, e-mail. Versionné.
+model ProspectProduction {
+  id         String   @id @default(uuid(7)) @db.Char(36)
+  prospectId String   @map("prospect_id") @db.Char(36)
+  missionId  String?  @map("mission_id") @db.Char(36)
+  /// PRODUCTION_KINDS.
+  kind       String   @db.VarChar(32)
+  /// Numéro de version, par prospect et par type.
+  version    Int
+  /// PRODUCTION_STATUSES.
+  status     String   @db.VarChar(32)
+  title      String?  @db.VarChar(250)
+  /// Contenu selon le type (productionContentSchemas).
+  content    Json
+  actorType  String   @map("actor_type") @db.VarChar(16)
+  actorId    String?  @map("actor_id") @db.VarChar(64)
+  createdAt  DateTime @map("created_at") @db.DateTime(3)
+  updatedAt  DateTime @map("updated_at") @db.DateTime(3)
+
+  prospect Prospect @relation(fields: [prospectId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([prospectId, kind, version])
+  @@map("prospect_productions")
+}
+
+/// Décision humaine (validation, refus, nouvelle analyse, décision sur un e-mail).
+model ProspectDecision {
+  id           String   @id @default(uuid(7)) @db.Char(36)
+  prospectId   String   @map("prospect_id") @db.Char(36)
+  missionId    String?  @map("mission_id") @db.Char(36)
+  productionId String?  @map("production_id") @db.Char(36)
+  /// DECISION_KINDS.
+  kind         String   @db.VarChar(48)
+  reason       String?  @db.Text
+  actorType    String   @map("actor_type") @db.VarChar(16)
+  actorId      String?  @map("actor_id") @db.VarChar(64)
+  createdAt    DateTime @map("created_at") @db.DateTime(3)
+
+  prospect Prospect @relation(fields: [prospectId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([prospectId, createdAt])
+  @@map("prospect_decisions")
+}
+
+/// E-mail envoyé ou reçu. "simulated" : rien n'est réellement parti.
+model ProspectMessage {
+  id           String   @id @default(uuid(7)) @db.Char(36)
+  prospectId   String   @map("prospect_id") @db.Char(36)
+  productionId String?  @map("production_id") @db.Char(36)
+  direction    String   @db.VarChar(16)
+  kind         String   @db.VarChar(16)
+  delivery     String   @db.VarChar(16)
+  fromAddress  String?  @map("from_address") @db.VarChar(254)
+  toAddress    String?  @map("to_address") @db.VarChar(254)
+  subject      String?  @db.VarChar(250)
+  body         String   @db.Text
+  occurredAt   DateTime @map("occurred_at") @db.DateTime(3)
+  createdAt    DateTime @map("created_at") @db.DateTime(3)
+
+  prospect Prospect @relation(fields: [prospectId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([prospectId, occurredAt])
+  @@map("prospect_messages")
+}
+
+/// Timeline du dossier. Ajout uniquement : la base refuse toute modification ou suppression.
+model ProspectEvent {
+  id         Int      @id @default(autoincrement())
+  prospectId String   @map("prospect_id") @db.Char(36)
+  missionId  String?  @map("mission_id") @db.Char(36)
+  /// PROSPECT_EVENT_TYPES.
+  type       String   @db.VarChar(48)
+  /// Salle où l'événement s'est produit (ROOM_IDS).
+  room       String?  @db.VarChar(32)
+  title      String   @db.VarChar(250)
+  details    String?  @db.Text
+  payload    Json
+  actorType  String   @map("actor_type") @db.VarChar(16)
+  actorId    String?  @map("actor_id") @db.VarChar(64)
+  createdAt  DateTime @map("created_at") @db.DateTime(3)
+
+  prospect Prospect @relation(fields: [prospectId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([prospectId, createdAt])
+  @@map("prospect_events")
 }
