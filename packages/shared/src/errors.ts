@@ -18,6 +18,8 @@ export const ERROR_CODES = {
   FORBIDDEN_ACTOR: 'FORBIDDEN_ACTOR',
   /** La mission a été modifiée entre-temps (version attendue différente). */
   CONCURRENT_MODIFICATION: 'CONCURRENT_MODIFICATION',
+  /** Contact interdit : le prospect a refusé ou demandé à ne plus être contacté. */
+  CONTACT_NOT_ALLOWED: 'CONTACT_NOT_ALLOWED',
   INTERNAL_ERROR: 'INTERNAL_ERROR',
 } as const;
 

@@ -202,11 +202,61 @@ qui dupliquerait ces listes.
 
 `agent_id` n'a pas encore de clé étrangère : la table `agents` sera créée avec les agents.
 
+### CRM : un dossier unique par prospect (migration `20261104120000_prospect_dossiers`)
+
+Un prospect = **un seul dossier**, enrichi salle après salle. Les missions de toutes les salles y sont
+rattachées (`missions.prospect_id`, facultatif : les missions existantes restent valides).
+
+| Table                  | Contenu                                                                                                                                                                                                                   |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prospects`            | Identité, chaîne (`youtube_channel_id` unique : pas de doublon), statistiques **avec source et date**, contact, découverte, étape (`stage`), relation, priorité, `do_not_contact`, prochaine action, `is_demo`, `version` |
+| `prospect_analyses`    | Analyses versionnées, jamais modifiées ; chaque information est un **fait vérifié** (sourcé), une **observation** ou une **hypothèse IA** ; score calculé à partir de critères pondérés                                   |
+| `prospect_productions` | Extraits, doublages, propositions, e-mails ; versionnés, statut propre                                                                                                                                                    |
+| `prospect_decisions`   | Décisions humaines (prospect validé / refusé / réanalyse, e-mail validé / refusé / à modifier)                                                                                                                            |
+| `prospect_messages`    | E-mails envoyés et reçus ; `delivery = simulated` tant qu'aucun envoi réel n'existe                                                                                                                                       |
+| `prospect_events`      | Timeline du dossier, **inaltérable en base** (mêmes triggers que `mission_events`)                                                                                                                                        |
+
+Règles (`packages/shared/src/prospects.ts`) : étapes et transitions autorisées, salle de chaque étape,
+statuts de relation, blocage des relances (`canSendFollowup` : jamais si refus ou « ne plus contacter »).
+Seul le service `apps/server/src/prospects/prospectService.ts` écrit dans ces tables ; chaque décision fait
+évoluer la mission **via le moteur de missions**, dans la même transaction que le dossier.
+
+« Nouvelle analyse demandée » : la mission de revue de Mon bureau est close (décision `reject` avec motif), le
+prospect n'est **pas** refusé, une nouvelle mission d'analyse est créée avec la consigne, et l'ancienne
+analyse est conservée. Le motif de refus d'un prospect est facultatif (un motif par défaut est enregistré
+sur la mission pour la traçabilité).
+
 ### Tables à venir
 
 - **Cœur** : `agents`
-- **CRM** : `creators`, `creator_channels`, `analyses`, `decisions`, `videos`, `dubbing_samples`,
-  `emails`, `email_replies`, `opportunities`, `followups`
+
+## 7 ter. API du CRM
+
+Contrat : `packages/shared/src/prospectApi.ts`. Toutes les actions renvoient le dossier complet à jour.
+
+| Méthode et route                               | Rôle                                                                                             |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `GET /api/prospects`                           | Liste (filtres `stage`, `search`)                                                                |
+| `GET /api/prospects/:id/dossier`               | Dossier complet : prospect, missions, analyses, productions, décisions, messages, timeline       |
+| `POST /api/prospects/:id/decisions`            | Mon bureau : `approve`, `reject` (motif facultatif), `request_reanalysis` (consigne facultative) |
+| `POST /api/prospects/:id/email/decisions`      | Validation des e-mails : `approve`, `reject`, `request_changes` (motif obligatoire)              |
+| `POST /api/prospects/:id/email/drafts`         | Modifier le brouillon (crée une nouvelle version)                                                |
+| `POST /api/prospects/:id/email/simulated-send` | Enregistre un envoi **simulé** (refusé hors mode simulation)                                     |
+| `POST /api/prospects/:id/replies`              | Enregistrer une réponse reçue                                                                    |
+| `POST /api/prospects/:id/followups`            | Relance **simulée** (refusée si le prospect ne veut plus être contacté)                          |
+| `PATCH /api/prospects/:id/followup`            | Statut de la relation, prochaine action, priorité, « ne plus contacter »                         |
+| `POST /api/prospects/:id/notes`                | Note interne                                                                                     |
+
+`GET /api/missions` renvoie aussi le résumé du prospect de chaque mission et accepte `?prospectId=`.
+Les écritures du pipeline (créer un prospect, ajouter une analyse ou une production, changer d'étape) sont
+des méthodes du service, prêtes pour les agents et n8n, sans route HTTP pour l'instant.
+
+### Environnement de démonstration
+
+`npm run demo:setup` recrée la base `ai_agency_demo` (nom obligatoirement suffixé `_demo`) et y joue un
+scénario fictif **à travers les vrais services** (moteur de missions compris, horloge injectée pour dater
+les étapes). `npm run dev:demo` lance l'API sur le port 3101 et l'interface sur le port 5174 : la base
+réelle n'est jamais ouverte et la démo force le mode simulation.
 
 ## 7 bis. API des missions
 

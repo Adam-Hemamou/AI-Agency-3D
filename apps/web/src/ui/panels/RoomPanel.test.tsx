@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import type { Mission, MissionListResponse } from '@agency/shared';
+import type { MissionListItem as Mission, MissionListResponse } from '@agency/shared';
 import { RoomPanel, type RoomPanelProps } from './RoomPanel';
 
 function mission(overrides: Partial<Mission> = {}): Mission {
@@ -17,6 +17,8 @@ function mission(overrides: Partial<Mission> = {}): Mission {
     validatedAt: null,
     validatedBy: null,
     agentId: null,
+    prospectId: null,
+    prospect: null,
     attemptCount: 0,
     maxAttempts: 3,
     lastErrorCode: null,
@@ -126,5 +128,27 @@ describe('RoomPanel', () => {
   it('donne le focus au bouton de fermeture à l’ouverture', () => {
     renderPanel({ data: list([]) });
     expect(screen.getByRole('button', { name: 'Fermer le panneau' })).toHaveFocus();
+  });
+  it('affiche le prospect de la mission et ouvre son dossier au clic', () => {
+    const onOpenMission = vi.fn();
+    const m = mission({
+      type: 'review_prospect',
+      prospectId: 'p1',
+      prospect: {
+        id: 'p1',
+        reference: 'P-2026-0001',
+        creatorName: 'Créatrice Fictive',
+        channelName: 'Chaîne Fictive',
+        stage: 'review',
+      },
+    });
+    renderPanel({ data: list([m, mission()]), onOpenMission, activeMissionId: m.id });
+    const button = screen.getByRole('button', { name: /Créatrice Fictive/ });
+    expect(button).toHaveTextContent('P-2026-0001');
+    expect(button).toHaveTextContent('Validation du prospect');
+    expect(button).toHaveAttribute('aria-current', 'true');
+    expect(screen.getByText('Sans prospect associé')).toBeInTheDocument();
+    fireEvent.click(button);
+    expect(onOpenMission).toHaveBeenCalledWith(m);
   });
 });

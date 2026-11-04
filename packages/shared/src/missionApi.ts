@@ -9,6 +9,7 @@ import {
   VALIDATION_OUTCOMES,
 } from './missionLifecycle';
 import { ACTOR_TYPES, MISSION_ATTEMPTS, MISSION_PRIORITY, MISSION_STATUSES } from './missions';
+import { prospectSummarySchema } from './prospectSummary';
 import { ROOM_IDS } from './rooms';
 
 /**
@@ -49,6 +50,8 @@ export const createMissionRequestSchema = z.strictObject({
   /** Fixé à la création, non modifiable ensuite : impossible de contourner une validation. */
   requiresValidation: z.boolean().default(false),
   agentId: z.string().trim().min(1).max(64).nullable().default(null),
+  /** Prospect concerné par la mission (dossier central), si pertinent. */
+  prospectId: z.string().min(1).max(36).nullable().default(null),
   maxAttempts: z
     .number()
     .int()
@@ -129,6 +132,7 @@ export const missionListQuerySchema = z.strictObject({
   status: listParam(z.enum(MISSION_STATUSES)).optional(),
   room: listParam(z.enum(ROOM_IDS)).optional(),
   type: listParam(missionTypeSchema).optional(),
+  prospectId: z.string().min(1).max(36).optional(),
   /** "recent" : plus récentes d'abord. "priority" : plus prioritaires, puis plus anciennes. */
   sort: z.enum(MISSION_LIST_SORTS).default('recent'),
   limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -155,6 +159,7 @@ export const missionSchema = z.object({
   validatedAt: isoDate.nullable(),
   validatedBy: z.string().nullable(),
   agentId: z.string().nullable(),
+  prospectId: z.string().nullable(),
   attemptCount: z.number().int(),
   maxAttempts: z.number().int(),
   lastErrorCode: z.string().nullable(),
@@ -191,8 +196,14 @@ export const missionCommandResponseSchema = z.object({
 });
 export type MissionCommandResponse = z.infer<typeof missionCommandResponseSchema>;
 
+/** Mission dans une liste : accompagnée du résumé de son prospect. */
+export const missionListItemSchema = missionSchema.extend({
+  prospect: prospectSummarySchema.nullable(),
+});
+export type MissionListItem = z.infer<typeof missionListItemSchema>;
+
 export const missionListResponseSchema = z.object({
-  items: z.array(missionSchema),
+  items: z.array(missionListItemSchema),
   total: z.number().int(),
   limit: z.number().int(),
   offset: z.number().int(),

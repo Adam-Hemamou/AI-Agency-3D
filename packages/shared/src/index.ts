@@ -4,3 +4,6 @@ export * from './missionApi';
 export * from './rooms';
 export * from './errors';
 export * from './api';
+export * from './prospects';
+export * from './prospectSummary';
+export * from './prospectApi';

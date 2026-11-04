@@ -5,6 +5,8 @@ export const healthResponseSchema = z.object({
   status: z.enum(['ok', 'degraded']),
   version: z.string(),
   simulationMode: z.boolean(),
+  /** Vrai quand l'API est branchée sur la base de démonstration (données fictives). */
+  demoMode: z.boolean().optional(),
   uptimeSeconds: z.number().nonnegative(),
   checks: z.object({
     database: z.object({

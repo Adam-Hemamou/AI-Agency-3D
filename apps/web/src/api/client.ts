@@ -54,3 +54,41 @@ export async function fetchJson<T>(
   }
   return parsed.data;
 }
+
+/**
+ * Envoi JSON (POST, PATCH) + validation de la réponse.
+ * Les erreurs de l'API deviennent des ApiClientError lisibles.
+ */
+export async function sendJson<T>(
+  path: string,
+  method: 'POST' | 'PATCH',
+  payload: unknown,
+  schema: z.ZodType<T>,
+): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    throw new ApiClientError('NETWORK_ERROR', 'Le serveur est injoignable');
+  }
+
+  const body: unknown = await res.json().catch(() => undefined);
+  if (!res.ok) {
+    const apiError = (body as { error?: { code?: ErrorCode; message?: string } } | undefined)
+      ?.error;
+    throw new ApiClientError(
+      apiError?.code ?? 'INTERNAL_ERROR',
+      apiError?.message ?? `Erreur HTTP ${res.status}`,
+      res.status,
+    );
+  }
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    throw new ApiClientError('INVALID_RESPONSE', 'Réponse du serveur inattendue', res.status);
+  }
+  return parsed.data;
+}

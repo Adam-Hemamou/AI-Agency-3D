@@ -22,7 +22,23 @@ import {
 import { Prisma, type Mission as MissionRow } from '../generated/prisma/client.ts';
 import type { AppPrismaClient } from '../db/prisma.ts';
 import { AppError } from '../errors/AppError.ts';
-import { toMissionDto, toMissionEventDto } from './serializers.ts';
+import {
+  PROSPECT_SUMMARY_SELECT,
+  toMissionDto,
+  toMissionEventDto,
+  toProspectSummaryDto,
+} from './serializers.ts';
+
+/** Client Prisma utilisable dans une transaction (permet de composer avec d'autres services). */
+export type Db = Prisma.TransactionClient;
+
+/** Source de l'heure courante (remplaçable pour dater un scénario de démonstration). */
+export type Clock = () => Date;
+export const systemClock: Clock = () => new Date();
+
+export interface MissionServiceOptions {
+  clock?: Clock;
+}
 
 /** Auteur d'une action : l'utilisateur, un agent ou le système. */
 export interface Actor {
@@ -120,96 +136,198 @@ function missionNotFound(id: string): AppError {
  * Chaque modification et l'événement d'historique correspondant sont écrits
  * dans une même transaction : soit les deux sont enregistrés, soit aucun.
  */
-export function createMissionService(prisma: AppPrismaClient) {
+export function createMissionService(
+  prisma: AppPrismaClient,
+  { clock = systemClock }: MissionServiceOptions = {},
+) {
   /**
    * Applique un changement à une mission dans une transaction :
    * lecture → vérification des règles → mise à jour conditionnée à la version → événement.
    */
-  async function mutate(
+  async function mutateIn(
+    tx: Db,
     id: string,
     expectedVersion: number | undefined,
     actor: Actor,
-    build: (current: MissionRow) => {
+    build: (
+      current: MissionRow,
+      now: Date,
+    ) => {
       action: MissionEventAction;
       patch: MissionPatch;
       reason: string | null;
     },
   ): Promise<MissionCommandResponse> {
-    return prisma.$transaction(async (tx) => {
-      const current = await tx.mission.findUnique({ where: { id } });
-      if (!current) throw missionNotFound(id);
-      if (expectedVersion !== undefined && expectedVersion !== current.version) {
-        throw concurrentModification(id);
+    const current = await tx.mission.findUnique({ where: { id } });
+    if (!current) throw missionNotFound(id);
+    if (expectedVersion !== undefined && expectedVersion !== current.version) {
+      throw concurrentModification(id);
+    }
+
+    const now = clock();
+    const { action, patch, reason } = build(current, now);
+    const changes = diff(current, patch);
+
+    // Mise à jour conditionnée à la version lue : si une autre requête est passée entre-temps,
+    // aucune ligne n'est modifiée et la transaction est annulée.
+    const updated = await tx.mission.updateMany({
+      where: { id, version: current.version },
+      data: { ...toPrismaData(patch), version: { increment: 1 }, updatedAt: now },
+    });
+    if (updated.count !== 1) throw concurrentModification(id);
+
+    const event = await tx.missionEvent.create({
+      data: {
+        missionId: id,
+        action,
+        actorType: actor.type,
+        actorId: actor.id,
+        fromStatus: current.status,
+        toStatus: patch.status,
+        changes,
+        reason,
+        createdAt: now,
+      },
+    });
+
+    const mission = await tx.mission.findUniqueOrThrow({ where: { id } });
+    return { mission: toMissionDto(mission), event: toMissionEventDto(event) };
+  }
+
+  /** Crée une mission et son premier événement, dans la transaction fournie. */
+  async function createIn(
+    tx: Db,
+    input: CreateMissionInput,
+    actor: Actor,
+  ): Promise<MissionCommandResponse> {
+    if (input.prospectId !== null) {
+      const prospect = await tx.prospect.findUnique({
+        where: { id: input.prospectId },
+        select: { id: true },
+      });
+      if (!prospect) throw AppError.notFound(`Prospect introuvable : ${input.prospectId}`);
+    }
+    const now = clock();
+    const mission = await tx.mission.create({
+      data: {
+        type: input.type,
+        room: input.room,
+        priority: input.priority,
+        input: input.input,
+        requiresValidation: input.requiresValidation,
+        agentId: input.agentId,
+        maxAttempts: input.maxAttempts,
+        prospectId: input.prospectId,
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+    const initial: Record<string, unknown> = {
+      type: input.type,
+      room: input.room,
+      priority: input.priority,
+      requiresValidation: input.requiresValidation,
+      agentId: input.agentId,
+      maxAttempts: input.maxAttempts,
+    };
+    if (input.prospectId !== null) initial.prospectId = input.prospectId;
+    const changes = Object.fromEntries(
+      Object.entries(initial).map(([key, value]) => [key, { from: null, to: value }]),
+    ) as Prisma.InputJsonObject;
+    const event = await tx.missionEvent.create({
+      data: {
+        missionId: mission.id,
+        action: 'created',
+        actorType: actor.type,
+        actorId: actor.id,
+        fromStatus: null,
+        toStatus: mission.status,
+        changes,
+        reason: null,
+        createdAt: now,
+      },
+    });
+    return { mission: toMissionDto(mission), event: toMissionEventDto(event) };
+  }
+
+  /** Action de cycle de vie : démarrer, mettre en pause, bloquer, terminer… */
+  function applyActionIn(tx: Db, id: string, request: MissionTransitionRequest, actor: Actor) {
+    return mutateIn(tx, id, request.expectedVersion, actor, (current, now) => {
+      const check = checkMissionAction(toState(current), request.action);
+      if (!check.allowed) throw refusal(check, current, request.action);
+
+      const patch: MissionPatch = { status: check.to };
+      switch (request.action) {
+        case 'start':
+          patch.attemptCount = current.attemptCount + 1;
+          patch.startedAt = current.startedAt ?? now;
+          break;
+        case 'submit_for_validation':
+          if (request.output !== undefined) patch.output = request.output;
+          // Nouvelle soumission : la décision précédente ne s'applique plus.
+          patch.validationOutcome = null;
+          patch.validatedAt = null;
+          patch.validatedBy = null;
+          break;
+        case 'complete':
+          if (request.output !== undefined) patch.output = request.output;
+          patch.finishedAt = now;
+          break;
+        case 'block':
+          patch.lastErrorCode = request.errorCode ?? 'BLOCKED';
+          patch.lastErrorMessage = request.reason ?? null;
+          break;
+        case 'unblock':
+          patch.lastErrorCode = null;
+          patch.lastErrorMessage = null;
+          break;
+        case 'cancel':
+          patch.finishedAt = now;
+          break;
+        case 'pause':
+        case 'resume':
+          break;
       }
+      return { action: request.action, patch, reason: request.reason ?? null };
+    });
+  }
 
-      const { action, patch, reason } = build(current);
-      const changes = diff(current, patch);
+  function forbiddenValidator(): AppError {
+    return new AppError(
+      ERROR_CODES.FORBIDDEN_ACTOR,
+      'Seul un utilisateur humain peut rendre une décision de validation',
+      403,
+    );
+  }
 
-      // Mise à jour conditionnée à la version lue : si une autre requête est passée entre-temps,
-      // aucune ligne n'est modifiée et la transaction est annulée.
-      const updated = await tx.mission.updateMany({
-        where: { id, version: current.version },
-        data: { ...toPrismaData(patch), version: { increment: 1 } },
-      });
-      if (updated.count !== 1) throw concurrentModification(id);
+  /** Décision humaine sur un résultat soumis à validation. */
+  function decideIn(tx: Db, id: string, request: ValidationDecisionRequest, actor: Actor) {
+    if (actor.type !== VALIDATION_ACTOR) throw forbiddenValidator();
+    return mutateIn(tx, id, request.expectedVersion, actor, (current, now) => {
+      const check = checkValidationDecision(toState(current), request.decision);
+      if (!check.allowed) throw refusal(check, current, request.decision);
 
-      const event = await tx.missionEvent.create({
-        data: {
-          missionId: id,
-          action,
-          actorType: actor.type,
-          actorId: actor.id,
-          fromStatus: current.status,
-          toStatus: patch.status,
-          changes,
-          reason,
-        },
-      });
-
-      const mission = await tx.mission.findUniqueOrThrow({ where: { id } });
-      return { mission: toMissionDto(mission), event: toMissionEventDto(event) };
+      const transition = VALIDATION_TRANSITIONS[request.decision];
+      const patch: MissionPatch = {
+        status: check.to,
+        validationOutcome: transition.outcome,
+        validatedAt: now,
+        validatedBy: actor.id ?? actor.type,
+      };
+      if (check.to === 'completed' || check.to === 'cancelled') patch.finishedAt = now;
+      return { action: request.decision, patch, reason: request.reason ?? null };
     });
   }
 
   return {
+    /**
+     * Variantes utilisables dans une transaction déjà ouverte (service des prospects) :
+     * mêmes règles, et la mission évolue en même temps que le dossier.
+     */
+    inTransaction: { create: createIn, applyAction: applyActionIn, decide: decideIn },
+
     async create(input: CreateMissionInput, actor: Actor): Promise<MissionCommandResponse> {
-      return prisma.$transaction(async (tx) => {
-        const mission = await tx.mission.create({
-          data: {
-            type: input.type,
-            room: input.room,
-            priority: input.priority,
-            input: input.input,
-            requiresValidation: input.requiresValidation,
-            agentId: input.agentId,
-            maxAttempts: input.maxAttempts,
-          },
-        });
-        const initial = {
-          type: input.type,
-          room: input.room,
-          priority: input.priority,
-          requiresValidation: input.requiresValidation,
-          agentId: input.agentId,
-          maxAttempts: input.maxAttempts,
-        };
-        const changes = Object.fromEntries(
-          Object.entries(initial).map(([key, value]) => [key, { from: null, to: value }]),
-        );
-        const event = await tx.missionEvent.create({
-          data: {
-            missionId: mission.id,
-            action: 'created',
-            actorType: actor.type,
-            actorId: actor.id,
-            fromStatus: null,
-            toStatus: mission.status,
-            changes,
-            reason: null,
-          },
-        });
-        return { mission: toMissionDto(mission), event: toMissionEventDto(event) };
-      });
+      return prisma.$transaction((tx) => createIn(tx, input, actor));
     },
 
     async get(id: string): Promise<Mission> {
@@ -223,6 +341,7 @@ export function createMissionService(prisma: AppPrismaClient) {
         ...(query.status && { status: { in: query.status } }),
         ...(query.room && { room: { in: query.room } }),
         ...(query.type && { type: { in: query.type } }),
+        ...(query.prospectId && { prospectId: query.prospectId }),
       };
       const orderBy: Prisma.MissionOrderByWithRelationInput[] =
         query.sort === 'priority'
@@ -230,10 +349,24 @@ export function createMissionService(prisma: AppPrismaClient) {
           : [{ createdAt: 'desc' }, { id: 'desc' }];
 
       const [rows, total] = await prisma.$transaction([
-        prisma.mission.findMany({ where, orderBy, take: query.limit, skip: query.offset }),
+        prisma.mission.findMany({
+          where,
+          orderBy,
+          take: query.limit,
+          skip: query.offset,
+          include: { prospect: { select: PROSPECT_SUMMARY_SELECT } },
+        }),
         prisma.mission.count({ where }),
       ]);
-      return { items: rows.map(toMissionDto), total, limit: query.limit, offset: query.offset };
+      return {
+        items: rows.map((row) => ({
+          ...toMissionDto(row),
+          prospect: row.prospect ? toProspectSummaryDto(row.prospect) : null,
+        })),
+        total,
+        limit: query.limit,
+        offset: query.offset,
+      };
     },
 
     async events(id: string): Promise<MissionEvent[]> {
@@ -246,73 +379,13 @@ export function createMissionService(prisma: AppPrismaClient) {
       return rows.map(toMissionEventDto);
     },
 
-    /** Action de cycle de vie : démarrer, mettre en pause, bloquer, terminer… */
     async applyAction(id: string, request: MissionTransitionRequest, actor: Actor) {
-      return mutate(id, request.expectedVersion, actor, (current) => {
-        const check = checkMissionAction(toState(current), request.action);
-        if (!check.allowed) throw refusal(check, current, request.action);
-
-        const now = new Date();
-        const patch: MissionPatch = { status: check.to };
-        switch (request.action) {
-          case 'start':
-            patch.attemptCount = current.attemptCount + 1;
-            patch.startedAt = current.startedAt ?? now;
-            break;
-          case 'submit_for_validation':
-            if (request.output !== undefined) patch.output = request.output;
-            // Nouvelle soumission : la décision précédente ne s'applique plus.
-            patch.validationOutcome = null;
-            patch.validatedAt = null;
-            patch.validatedBy = null;
-            break;
-          case 'complete':
-            if (request.output !== undefined) patch.output = request.output;
-            patch.finishedAt = now;
-            break;
-          case 'block':
-            patch.lastErrorCode = request.errorCode ?? 'BLOCKED';
-            patch.lastErrorMessage = request.reason ?? null;
-            break;
-          case 'unblock':
-            patch.lastErrorCode = null;
-            patch.lastErrorMessage = null;
-            break;
-          case 'cancel':
-            patch.finishedAt = now;
-            break;
-          case 'pause':
-          case 'resume':
-            break;
-        }
-        return { action: request.action, patch, reason: request.reason ?? null };
-      });
+      return prisma.$transaction((tx) => applyActionIn(tx, id, request, actor));
     },
 
-    /** Décision humaine sur un résultat soumis à validation. */
     async decide(id: string, request: ValidationDecisionRequest, actor: Actor) {
-      if (actor.type !== VALIDATION_ACTOR) {
-        throw new AppError(
-          ERROR_CODES.FORBIDDEN_ACTOR,
-          'Seul un utilisateur humain peut rendre une décision de validation',
-          403,
-        );
-      }
-      return mutate(id, request.expectedVersion, actor, (current) => {
-        const check = checkValidationDecision(toState(current), request.decision);
-        if (!check.allowed) throw refusal(check, current, request.decision);
-
-        const now = new Date();
-        const transition = VALIDATION_TRANSITIONS[request.decision];
-        const patch: MissionPatch = {
-          status: check.to,
-          validationOutcome: transition.outcome,
-          validatedAt: now,
-          validatedBy: actor.id ?? actor.type,
-        };
-        if (check.to === 'completed' || check.to === 'cancelled') patch.finishedAt = now;
-        return { action: request.decision, patch, reason: request.reason ?? null };
-      });
+      if (actor.type !== VALIDATION_ACTOR) throw forbiddenValidator();
+      return prisma.$transaction((tx) => decideIn(tx, id, request, actor));
     },
   };
 }

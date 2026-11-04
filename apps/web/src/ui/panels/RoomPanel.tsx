@@ -3,7 +3,8 @@ import {
   MISSION_STATUSES,
   ROOM_DESCRIPTIONS,
   ROOM_LABELS,
-  type Mission,
+  missionTypeLabel,
+  type MissionListItem,
   type MissionListResponse,
   type RoomId,
 } from '@agency/shared';
@@ -23,7 +24,13 @@ export interface RoomPanelProps {
   error?: Error | null;
   onClose: () => void;
   onRetry: () => void;
+  /** Ouvre le dossier lié à la mission. */
+  onOpenMission?: (mission: MissionListItem) => void;
+  /** Mission dont le dossier est ouvert (mise en évidence). */
+  activeMissionId?: string | null;
 }
+
+type Mission = MissionListItem;
 
 const dateFormat = new Intl.DateTimeFormat('fr-FR', {
   day: 'numeric',
@@ -32,20 +39,50 @@ const dateFormat = new Intl.DateTimeFormat('fr-FR', {
   minute: '2-digit',
 });
 
-function MissionItem({ mission }: { mission: Mission }) {
+function MissionItem({
+  mission,
+  active,
+  onOpen,
+}: {
+  mission: Mission;
+  active: boolean;
+  onOpen?: (mission: Mission) => void;
+}) {
+  const prospect = mission.prospect;
+  const typeLabel = missionTypeLabel(mission.type);
   return (
-    <li className="mission-item">
-      <div className="mission-item__main">
-        <span className="mission-item__type">{mission.type}</span>
-        <StatusBadge status={mission.status} />
-      </div>
-      <div className="mission-item__meta">
-        <span title="Priorité (1 à 5)">Priorité {mission.priority}</span>
-        {mission.requiresValidation && (
-          <span className="mission-item__tag">Validation humaine</span>
+    <li>
+      <button
+        type="button"
+        className={`mission-item ${active ? 'mission-item--active' : ''}`}
+        onClick={() => onOpen?.(mission)}
+        aria-current={active ? 'true' : undefined}
+        title={prospect ? `Ouvrir le dossier ${prospect.reference}` : 'Voir la mission'}
+      >
+        <div className="mission-item__main">
+          <span className="mission-item__type">{prospect ? prospect.creatorName : typeLabel}</span>
+          <StatusBadge status={mission.status} />
+        </div>
+        {prospect ? (
+          <div className="mission-item__prospect">
+            <span className="mission-item__ref">{prospect.reference}</span>
+            <span>{prospect.channelName}</span>
+            <span aria-hidden="true">·</span>
+            <span>{typeLabel}</span>
+          </div>
+        ) : (
+          <div className="mission-item__prospect mission-item__prospect--none">
+            Sans prospect associé
+          </div>
         )}
-        <span>Créée le {dateFormat.format(new Date(mission.createdAt))}</span>
-      </div>
+        <div className="mission-item__meta">
+          <span title="Priorité (1 à 5)">Priorité {mission.priority}</span>
+          {mission.requiresValidation && (
+            <span className="mission-item__tag">Validation humaine</span>
+          )}
+          <span>Créée le {dateFormat.format(new Date(mission.createdAt))}</span>
+        </div>
+      </button>
     </li>
   );
 }
@@ -86,7 +123,12 @@ function Body({
   isLoading,
   error,
   onRetry,
-}: Pick<RoomPanelProps, 'data' | 'isLoading' | 'error' | 'onRetry'>) {
+  onOpenMission,
+  activeMissionId,
+}: Pick<
+  RoomPanelProps,
+  'data' | 'isLoading' | 'error' | 'onRetry' | 'onOpenMission' | 'activeMissionId'
+>) {
   if (isLoading) {
     return (
       <div className="room-panel__state" role="status">
@@ -132,7 +174,12 @@ function Body({
       )}
       <ul className="mission-list" aria-label="Missions de la salle">
         {data.items.map((m) => (
-          <MissionItem key={m.id} mission={m} />
+          <MissionItem
+            key={m.id}
+            mission={m}
+            active={m.id === activeMissionId}
+            onOpen={onOpenMission}
+          />
         ))}
       </ul>
       {partial && (
@@ -151,6 +198,8 @@ export function RoomPanel({
   error,
   onClose,
   onRetry,
+  onOpenMission,
+  activeMissionId = null,
 }: RoomPanelProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
 
@@ -200,7 +249,14 @@ export function RoomPanel({
       </div>
 
       <div className="room-panel__body">
-        <Body data={data} isLoading={isLoading} error={error} onRetry={onRetry} />
+        <Body
+          data={data}
+          isLoading={isLoading}
+          error={error}
+          onRetry={onRetry}
+          onOpenMission={onOpenMission}
+          activeMissionId={activeMissionId}
+        />
       </div>
     </aside>
   );

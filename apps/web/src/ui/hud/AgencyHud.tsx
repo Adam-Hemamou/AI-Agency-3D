@@ -15,6 +15,11 @@ export function AgencyHud() {
 
   return (
     <>
+      {health.data?.demoMode && (
+        <p className="hud-demo" role="note">
+          <strong>Démonstration</strong> · données fictives, base séparée · aucune action réelle
+        </p>
+      )}
       <header className="hud-card hud-brand">
         <div className="hud-brand__logo" aria-hidden="true">
           ◆

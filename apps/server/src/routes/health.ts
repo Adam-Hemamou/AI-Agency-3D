@@ -24,10 +24,16 @@ interface HealthDeps {
   db: DatabaseProbe;
   version: string;
   simulationMode: boolean;
+  demoMode?: boolean;
 }
 
 /** GET /api/health : état de l'API et de la base. 200 si tout va bien, 503 sinon. */
-export function healthRouter({ db, version, simulationMode }: HealthDeps): Router {
+export function healthRouter({
+  db,
+  version,
+  simulationMode,
+  demoMode = false,
+}: HealthDeps): Router {
   const router = Router();
 
   router.get('/', async (_req, res) => {
@@ -47,6 +53,7 @@ export function healthRouter({ db, version, simulationMode }: HealthDeps): Route
       status: database.status === 'up' ? 'ok' : 'degraded',
       version,
       simulationMode,
+      demoMode,
       uptimeSeconds: Math.round(process.uptime()),
       checks: { database },
       timestamp: new Date().toISOString(),
