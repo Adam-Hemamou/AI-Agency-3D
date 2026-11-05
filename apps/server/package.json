@@ -19,7 +19,8 @@
     "db:deploy": "prisma migrate deploy",
     "dev:demo": "tsx src/demo/devServer.ts",
     "demo:setup": "tsx src/demo/setupDemo.ts",
-    "owner:password": "tsx src/auth/ownerPasswordCli.ts"
+    "owner:password": "tsx src/auth/ownerPasswordCli.ts",
+    "db:check-duplicates": "tsx src/db/checkDuplicates.ts"
   },
   "dependencies": {
     "@agency/shared": "*",

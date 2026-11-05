@@ -37,6 +37,7 @@ export async function resetDatabase(): Promise<void> {
       'prospect_productions',
       'prospect_analyses',
       'prospects',
+      'prospect_counters',
       'owner_sessions',
       'owner_credentials',
       'agent_requests',
