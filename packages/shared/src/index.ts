@@ -8,3 +8,4 @@ export * from './prospects';
 export * from './prospectSummary';
 export * from './prospectApi';
 export * from './agents';
+export * from './auth';

@@ -12,6 +12,9 @@ export const notFoundHandler: RequestHandler = (req, _res, next) => {
 /** Convertit toute erreur en réponse JSON { error: { code, message, details? } }. */
 export const errorHandler: ErrorRequestHandler = (err: unknown, req, res, _next) => {
   if (err instanceof AppError) {
+    const retryAfter = (err.details as { retryAfterSeconds?: unknown } | undefined)
+      ?.retryAfterSeconds;
+    if (typeof retryAfter === 'number') res.set('Retry-After', String(retryAfter));
     const body: ApiErrorBody = {
       error: { code: err.code, message: err.message, details: err.details },
     };

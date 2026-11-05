@@ -13,6 +13,19 @@ export const envSchema = z.object({
   SERVER_PORT: z.coerce.number().int().min(1).max(65535).default(3001),
   /** Garde-fou : actif par défaut. Doit être explicitement mis à "false" pour autoriser le réel. */
   MODE_SIMULATION: booleanFlag.default(true),
+  /**
+   * Noms d'hôte acceptés en plus de localhost / 127.0.0.1, séparés par des virgules
+   * (ex. « host.docker.internal » quand n8n sera branché). Vide par défaut.
+   */
+  ALLOWED_HOSTS: z
+    .string()
+    .default('')
+    .transform((value) =>
+      value
+        .split(',')
+        .map((h) => h.trim().toLowerCase())
+        .filter(Boolean),
+    ),
   DATABASE_URL: z
     .string({ error: 'DATABASE_URL est obligatoire' })
     .startsWith('mysql://', { error: 'DATABASE_URL doit commencer par mysql://' }),

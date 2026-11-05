@@ -1,5 +1,4 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import request from 'supertest';
 import {
   PIPELINE_MISSION_TYPES,
   prospectDossierSchema,
@@ -8,6 +7,8 @@ import {
   type RoomId,
 } from '@agency/shared';
 import { createApp } from '../app.ts';
+import { createOwnerAuthService } from '../auth/ownerAuth.ts';
+import { ownerClient } from '../test/ownerSession.ts';
 import { AppError } from '../errors/AppError.ts';
 import { createMissionService, type Actor } from '../missions/missionService.ts';
 import { createTestPrisma, resetDatabase } from '../test/testDb.ts';
@@ -141,17 +142,23 @@ describe('dossier unique', () => {
 
   it('refuse un second dossier pour la même chaîne', async () => {
     await service.createProspect(baseProspect, agent);
-    await expectAppError(service.createProspect(baseProspect, agent), 'INVALID_TRANSITION');
+    await expectAppError(service.createProspect(baseProspect, agent), 'ALREADY_EXISTS');
   });
 
   it('garde le même dossier d’une salle à l’autre et refuse les étapes interdites', async () => {
     const d = await prospectInReview();
     expect(new Set(d.missions.map((m) => m.prospectId))).toEqual(new Set([d.prospect.id]));
     expect(d.missions.map((m) => m.room)).toEqual(['prospecting', 'analysis', 'director']);
+    // Le système lui-même ne peut pas sauter d'étape (cycle de vie)…
     await expectAppError(
-      service.moveToStage(d.prospect.id, 'followup', agent),
+      service.moveToStage(d.prospect.id, 'followup', { type: 'system', id: null }),
       'INVALID_TRANSITION',
     );
+    // … et un agent ne franchit jamais une étape de décision humaine.
+    for (const to of ['dubbing', 'refused', 'analysis', 'archived'] as const) {
+      await expectAppError(service.moveToStage(d.prospect.id, to, agent), 'FORBIDDEN_ACTOR');
+    }
+    expect((await service.getDossier(d.prospect.id)).prospect.stage).toBe('review');
   });
 
   it('calcule le score à partir des critères pondérés', async () => {
@@ -255,6 +262,24 @@ describe('décisions de Mon bureau', () => {
     );
     expect((await service.getDossier(d.prospect.id)).prospect.stage).toBe('review');
   });
+
+  it('refuse une décision prise par le système ou par un agent se déclarant « utilisateur »', async () => {
+    const d = await prospectInReview();
+    const missionId = openMission(d, 'director').id;
+    for (const actor of [
+      { type: 'system', id: null },
+      { type: 'user', id: 'agent-test' },
+      { type: 'user', id: null },
+    ] satisfies Actor[]) {
+      await expectAppError(
+        service.decideProspect(d.prospect.id, { missionId, decision: 'reject' }, actor),
+        'FORBIDDEN_ACTOR',
+      );
+    }
+    const after = await service.getDossier(d.prospect.id);
+    expect(after.prospect.stage).toBe('review');
+    expect(after.decisions).toHaveLength(0);
+  });
 });
 
 describe('validation des e-mails et suivi', () => {
@@ -301,6 +326,25 @@ describe('validation des e-mails et suivi', () => {
       { direction: 'outbound', delivery: 'simulated', subject: 'Nouvel objet' },
     ]);
     expect(openMission(d, 'followup').status).toBe('in_progress');
+  });
+
+  it('refuse qu’un agent valide, refuse ou fasse corriger un e-mail', async () => {
+    const d = await prospectWithEmail();
+    const missionId = openMission(d, 'email_review').id;
+    const productionId = latestEmail(d).id;
+    for (const decision of ['approve', 'reject', 'request_changes'] as const) {
+      await expectAppError(
+        service.decideEmail(
+          d.prospect.id,
+          { missionId, productionId, decision, reason: 'Décision d’agent' },
+          agent,
+        ),
+        'FORBIDDEN_ACTOR',
+      );
+    }
+    const after = await service.getDossier(d.prospect.id);
+    expect(latestEmail(after).status).toBe('pending_review');
+    expect(openMission(after, 'email_review').status).toBe('awaiting_validation');
   });
 
   it('refuse d’agir sur une ancienne version de l’e-mail', async () => {
@@ -390,28 +434,30 @@ describe('historique et API', () => {
   it('expose le dossier et valide les requêtes', async () => {
     const d = await prospectInReview();
     const app = createApp({
+      owner: createOwnerAuthService({ prisma }),
       db: { ping: async () => {} },
       missions,
       prospects: service,
       version: 'test',
       simulationMode: true,
     });
-    const res = await request(app).get(`/api/prospects/${d.prospect.id}/dossier`);
+    const owner = await ownerClient(app, prisma);
+    const res = await owner.get(`/api/prospects/${d.prospect.id}/dossier`);
     expect(res.status).toBe(200);
     expect(prospectDossierSchema.parse(res.body).prospect.id).toBe(d.prospect.id);
 
-    const list = await request(app).get('/api/missions?room=director');
+    const list = await owner.get('/api/missions?room=director');
     expect(list.body.items[0].prospect).toMatchObject({
       id: d.prospect.id,
       reference: d.prospect.reference,
     });
 
-    const bad = await request(app)
+    const bad = await owner
       .post(`/api/prospects/${d.prospect.id}/decisions`)
       .send({ missionId: openMission(d, 'director').id, decision: 'approve', instruction: 'x' });
     expect(bad.status).toBe(400);
 
-    const ok = await request(app)
+    const ok = await owner
       .post(`/api/prospects/${d.prospect.id}/decisions`)
       .send({ missionId: openMission(d, 'director').id, decision: 'approve' });
     expect(ok.status).toBe(200);

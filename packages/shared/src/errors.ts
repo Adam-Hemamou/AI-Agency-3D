@@ -24,6 +24,12 @@ export const ERROR_CODES = {
   ALREADY_EXISTS: 'ALREADY_EXISTS',
   /** Clé d'idempotence déjà utilisée pour une autre requête, ou requête identique encore en cours. */
   IDEMPOTENCY_CONFLICT: 'IDEMPOTENCY_CONFLICT',
+  /** Trop de tentatives ou de requêtes : réessayer après le délai indiqué (en-tête Retry-After). */
+  RATE_LIMITED: 'RATE_LIMITED',
+  /** Requête venant d'un autre site ou d'une adresse non autorisée (en-têtes Host / Origin). */
+  FORBIDDEN_ORIGIN: 'FORBIDDEN_ORIGIN',
+  /** Aucun mot de passe administrateur défini : lancer « npm run owner:password ». */
+  OWNER_PASSWORD_NOT_SET: 'OWNER_PASSWORD_NOT_SET',
   /** Contact interdit : le prospect a refusé ou demandé à ne plus être contacté. */
   CONTACT_NOT_ALLOWED: 'CONTACT_NOT_ALLOWED',
   INTERNAL_ERROR: 'INTERNAL_ERROR',
