@@ -7,7 +7,7 @@ import {
 } from '@agency/shared';
 import { useAgencyStore } from '../../../stores/agencyStore';
 import { formatCompact, formatDate, formatDateTime, formatInt, formatRelative } from '../format';
-import { Card, Field, Fields, Missing, PriorityDots } from '../primitives';
+import { Card, ExternalLink, Field, Fields, Missing, PriorityDots } from '../primitives';
 import { Timeline } from './Timeline';
 
 function Stat({ label, value }: { label: string; value: number | null }) {
@@ -35,13 +35,7 @@ export function OverviewSection({ dossier }: { dossier: ProspectDossier }) {
           <Field label="Créateur">{p.creatorName}</Field>
           <Field label="Chaîne">{p.channelName}</Field>
           <Field label="Identifiant">{p.channelHandle}</Field>
-          <Field label="Adresse">
-            {p.channelUrl && (
-              <a href={p.channelUrl} target="_blank" rel="noreferrer noopener">
-                {p.channelUrl.replace(/^https?:\/\//, '')}
-              </a>
-            )}
-          </Field>
+          <Field label="Adresse">{p.channelUrl && <ExternalLink url={p.channelUrl} />}</Field>
           <Field label="Catégorie">{p.category}</Field>
           <Field label="Pays">{p.country}</Field>
         </Fields>

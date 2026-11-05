@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import {
   INSIGHT_KIND_LABELS,
   PRODUCTION_STATUS_LABELS,
+  isSafeHttpUrl,
   type Insight,
   type InsightKind,
   type ProductionStatus,
@@ -231,5 +232,21 @@ export function VersionPicker<T extends { id: string; version: number }>({
         </button>
       ))}
     </div>
+  );
+}
+
+/**
+ * Lien vers une adresse fournie par les données (agents, import…). Un lien n'est créé que pour
+ * http(s) : une adresse « javascript: » ou « data: » s'afficherait en texte, sans être cliquable.
+ */
+export function ExternalLink({ url, newTab = true }: { url: string; newTab?: boolean }) {
+  const label = url.replace(/^https?:\/\//, '');
+  if (!isSafeHttpUrl(url)) return <span className="d-unsafe-url">{url}</span>;
+  return newTab ? (
+    <a href={url} target="_blank" rel="noreferrer noopener">
+      {label}
+    </a>
+  ) : (
+    <a href={url}>{label}</a>
   );
 }

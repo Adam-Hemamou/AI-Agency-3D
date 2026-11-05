@@ -17,6 +17,8 @@ const EVENT_ICONS: Record<ProspectEvent['type'], string> = {
   followup_updated: '📌',
   note_added: '📝',
   mission_linked: '🔗',
+  prospect_enriched: '🧩',
+  agent_activity: '🤖',
 };
 
 /**

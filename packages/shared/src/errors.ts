@@ -22,6 +22,8 @@ export const ERROR_CODES = {
   UNAUTHENTICATED: 'UNAUTHENTICATED',
   /** La ressource à créer existe déjà (ex. : un agent avec le même identifiant). */
   ALREADY_EXISTS: 'ALREADY_EXISTS',
+  /** Clé d'idempotence déjà utilisée pour une autre requête, ou requête identique encore en cours. */
+  IDEMPOTENCY_CONFLICT: 'IDEMPOTENCY_CONFLICT',
   /** Contact interdit : le prospect a refusé ou demandé à ne plus être contacté. */
   CONTACT_NOT_ALLOWED: 'CONTACT_NOT_ALLOWED',
   INTERNAL_ERROR: 'INTERNAL_ERROR',
