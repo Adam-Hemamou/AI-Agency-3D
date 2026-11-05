@@ -6,8 +6,13 @@ import {
   PROSPECT_STAGE_ROOMS,
   RELATIONSHIP_STATUS_LABELS,
   ROOM_LABELS,
+  canAgentMoveToStage,
   canMoveToStage,
   canSendFollowup,
+  channelHandleKey,
+  channelUrlKey,
+  normalizeChannelHandle,
+  parseChannelUrl,
   computeAnalysisScore,
   createAnalysisRequestSchema,
   createMissionRequestSchema,
@@ -17,7 +22,11 @@ import {
   type CreateMissionRequest,
   type CreateProductionRequest,
   type CreateProspectRequest,
+  type AgentEventRequest,
+  type AgentStageRequest,
   type DecisionKind,
+  type DuplicateMatchField,
+  type EnrichProspectRequest,
   type EmailDecisionRequest,
   type EmailDraftRequest,
   type FollowupMessageRequest,
@@ -30,14 +39,18 @@ import {
   type ProspectDossier,
   type ProspectEventType,
   type ProspectListResponse,
+  type ProspectLookupQuery,
+  type ProspectLookupResponse,
   type ProspectStage,
   type RelationshipStatus,
   type ReplyRequest,
   type RoomId,
   emailContentSchema,
 } from '@agency/shared';
-import type { Prisma, Prospect as ProspectRow } from '../generated/prisma/client.ts';
+import { Prisma, type Prospect as ProspectRow } from '../generated/prisma/client.ts';
 import type { AppPrismaClient } from '../db/prisma.ts';
+import type { TransactionHook } from '../db/transactionHook.ts';
+import { assertHumanActor, isHumanActor } from '../auth/actors.ts';
 import { AppError } from '../errors/AppError.ts';
 import { parseOrThrow } from '../lib/validate.ts';
 import {
@@ -57,6 +70,16 @@ import {
   toProspectEventDto,
 } from './serializers.ts';
 
+/**
+ * Contrôle supplémentaire exécuté dans la transaction, sur le dossier tel qu'il est lu
+ * (ex. : règles propres aux agents). Il lève une erreur pour refuser la commande.
+ */
+export interface CommandOptions {
+  guard?: (row: ProspectRow) => void;
+  /** Instructions exécutées dans la même transaction (idempotence des requêtes d'agents). */
+  hook?: TransactionHook;
+}
+
 export interface ProspectServiceDeps {
   prisma: AppPrismaClient;
   missions: MissionService;
@@ -72,6 +95,53 @@ const PRODUCTION_ADDED_TITLES: Record<CreateProductionRequest['kind'], string> =
   proposal: 'Proposition commerciale préparée',
   email: 'E-mail rédigé',
 };
+
+/**
+ * Mission créée par le serveur quand un prospect arrive à une étape (passage demandé par un agent).
+ * C'est le CRM qui décide : l'agent ne choisit ni le type ni l'exigence de validation humaine.
+ */
+const STAGE_MISSIONS: Partial<
+  Record<ProspectStage, Omit<CreateMissionRequest, 'prospectId' | 'priority'>>
+> = {
+  analysis: { type: PIPELINE_MISSION_TYPES.analyze, room: 'analysis' },
+  review: { type: PIPELINE_MISSION_TYPES.review, room: 'director', requiresValidation: true },
+  dubbing: { type: PIPELINE_MISSION_TYPES.dubbing, room: 'dubbing' },
+  proposal: { type: PIPELINE_MISSION_TYPES.proposal, room: 'copywriting' },
+  email_review: {
+    type: PIPELINE_MISSION_TYPES.emailReview,
+    room: 'email_review',
+    requiresValidation: true,
+  },
+  followup: { type: PIPELINE_MISSION_TYPES.followup, room: 'followup' },
+};
+
+/** Statuts qu'un auteur non humain peut donner à un e-mail : jamais « validé » ni « envoyé ». */
+const NON_HUMAN_EMAIL_STATUSES: readonly ProductionStatus[] = ['draft', 'pending_review'];
+
+/** Libellés des champs complétés (historique du dossier). */
+const ENRICHABLE_FIELD_LABELS: Record<string, string> = {
+  creatorName: 'nom du créateur',
+  channelName: 'nom de la chaîne',
+  channelHandle: 'identifiant de chaîne',
+  youtubeChannelId: 'identifiant YouTube',
+  channelUrl: 'adresse de la chaîne',
+  avatarUrl: 'avatar',
+  category: 'catégorie',
+  description: 'description',
+  country: 'pays',
+  subscriberCount: 'abonnés',
+  viewCount: 'vues',
+  videoCount: 'vidéos',
+  statsSource: 'source des statistiques',
+  statsUpdatedAt: 'date des statistiques',
+  contactEmail: 'e-mail de contact',
+  contactName: 'nom du contact',
+  contactSource: 'source du contact',
+  priority: 'priorité',
+};
+
+/** Nouvel essai de création si deux dossiers reçoivent le même numéro en même temps. */
+const CREATE_ATTEMPTS = 5;
 
 /** Acteur « système » : enchaînements automatiques entre les salles. */
 const SYSTEM: Actor = { type: 'system', id: null };
@@ -91,6 +161,38 @@ type ProspectPatch = Partial<
     | 'nextActionAt'
   >
 >;
+
+function forbidden(message: string): AppError {
+  return new AppError(ERROR_CODES.FORBIDDEN_ACTOR, message, 403);
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+}
+
+/**
+ * Conflit passager entre transactions simultanées (interblocage, attente de verrou dépassée) :
+ * MySQL annule l'une d'elles, qui peut être rejouée sans risque.
+ */
+function isTransientConflict(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as { code?: unknown }).code;
+  return (
+    code === 'P2034' || /deadlock|lock wait timeout|try restarting transaction/i.test(error.message)
+  );
+}
+
+/** Numéro de dossier lisible : P-AAAA-NNNN. */
+export function formatReference(year: number, number: number): string {
+  return `P-${year}-${String(number).padStart(4, '0')}`;
+}
+
+function toJsonable(value: unknown): Prisma.InputJsonValue | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'bigint') return Number(value);
+  if (value instanceof Date) return value.toISOString();
+  return value as Prisma.InputJsonValue;
+}
 
 function invalid(message: string, details?: unknown): AppError {
   return new AppError(ERROR_CODES.INVALID_TRANSITION, message, 409, details);
@@ -122,7 +224,15 @@ export function createProspectService({
   // Outils internes (toujours dans une transaction)
   // -------------------------------------------------------------------------
 
+  /**
+   * Charge le dossier en VERROUILLANT sa ligne jusqu'à la fin de la transaction : deux commandes
+   * simultanées sur le même dossier (plusieurs agents, l'utilisateur) passent l'une après l'autre
+   * au lieu d'être refusées pour « modification concurrente ». Le verrou est pris avant toute
+   * lecture ordinaire : la photo de la base prise ensuite contient la dernière version validée.
+   * La vérification d'expectedVersion reste appliquée (affichage réellement périmé).
+   */
   async function load(tx: Db, id: string): Promise<ProspectRow> {
+    await tx.$queryRaw`SELECT id FROM prospects WHERE id = ${id} FOR UPDATE`;
     const row = await tx.prospect.findUnique({ where: { id } });
     if (!row) throw AppError.notFound(`Prospect introuvable : ${id}`);
     return row;
@@ -135,7 +245,11 @@ export function createProspectService({
   }
 
   /** Met à jour le dossier (contrôle de version) et date la dernière activité. */
-  async function update(tx: Db, row: ProspectRow, patch: ProspectPatch): Promise<ProspectRow> {
+  async function update(
+    tx: Db,
+    row: ProspectRow,
+    patch: ProspectPatch | Prisma.ProspectUpdateManyMutationInput,
+  ): Promise<ProspectRow> {
     const now = clock();
     const result = await tx.prospect.updateMany({
       where: { id: row.id, version: row.version },
@@ -182,6 +296,11 @@ export function createProspectService({
     extra: { missionId?: string | null; details?: string | null; patch?: ProspectPatch } = {},
   ): Promise<ProspectRow> {
     const from = row.stage as ProspectStage;
+    if (actor.type === 'agent' && !canAgentMoveToStage(from, to)) {
+      throw forbidden(
+        `Un agent ne peut pas faire passer un dossier de « ${PROSPECT_STAGE_LABELS[from]} » à « ${PROSPECT_STAGE_LABELS[to]} » : décision humaine`,
+      );
+    }
     if (!canMoveToStage(from, to)) {
       throw invalid(
         `Le dossier ${row.reference} ne peut pas passer de « ${PROSPECT_STAGE_LABELS[from]} » à « ${PROSPECT_STAGE_LABELS[to]} »`,
@@ -280,6 +399,131 @@ export function createProspectService({
     return production;
   }
 
+  /**
+   * Réserve le prochain numéro de dossier de l'année. DOIT être la première instruction de la
+   * transaction de création : la ligne du compteur reste verrouillée jusqu'à la fin de la
+   * transaction, les créations simultanées passent donc l'une après l'autre. Et comme aucune
+   * lecture n'a encore eu lieu, les lectures suivantes (recherche de doublons) voient toutes
+   * les créations déjà terminées.
+   */
+  async function reserveReferenceIn(tx: Db, now: Date): Promise<string> {
+    const year = now.getUTCFullYear();
+    await tx.$executeRaw`
+      INSERT INTO prospect_counters (year, last_number) VALUES (${year}, 1)
+      ON DUPLICATE KEY UPDATE last_number = last_number + 1`;
+    const counter = await tx.prospectCounter.findUniqueOrThrow({ where: { year } });
+    // Le compteur ne recule jamais derrière un numéro existant (dossiers importés, compteur absent).
+    const [existing] = await tx.$queryRaw<{ max: bigint | number | null }[]>`
+      SELECT MAX(CAST(SUBSTRING(reference, 8) AS UNSIGNED)) AS max
+      FROM prospects WHERE reference LIKE ${`P-${year}-%`}`;
+    const highest = Number(existing?.max ?? 0);
+    let number = counter.lastNumber;
+    if (highest >= number) {
+      number = highest + 1;
+      await tx.prospectCounter.update({ where: { year }, data: { lastNumber: number } });
+    }
+    return formatReference(year, number);
+  }
+
+  /** Une mission citée par une analyse, une production ou une activité concerne bien ce dossier. */
+  async function checkMissionBelongs(tx: Db, row: ProspectRow, missionId: string | null) {
+    if (missionId === null) return;
+    const mission = await tx.mission.findUnique({
+      where: { id: missionId },
+      select: { prospectId: true },
+    });
+    if (!mission || mission.prospectId !== row.id) {
+      throw AppError.validation(`Cette mission ne concerne pas le dossier ${row.reference}`);
+    }
+  }
+
+  /**
+   * Dossiers existants correspondant à une chaîne ou à un contact. Comparaisons insensibles
+   * à la casse (collation MySQL) ; "@nom", "nom" et l'URL ".../@nom" désignent la même chaîne.
+   */
+  async function findDuplicatesIn(
+    tx: Db,
+    criteria: ProspectLookupQuery,
+    excludeId?: string,
+  ): Promise<ProspectLookupResponse> {
+    const channelIds = new Set<string>();
+    const handles = new Set<string>();
+    if (criteria.youtubeChannelId) channelIds.add(criteria.youtubeChannelId.trim());
+    if (criteria.channelHandle) handles.add(normalizeChannelHandle(criteria.channelHandle));
+    const url = criteria.channelUrl?.trim().replace(/\/+$/, '');
+    if (url) {
+      const parsed = parseChannelUrl(url);
+      if (parsed && 'youtubeChannelId' in parsed) channelIds.add(parsed.youtubeChannelId);
+      if (parsed && 'channelHandle' in parsed) handles.add(parsed.channelHandle);
+    }
+    const email = criteria.contactEmail?.trim();
+
+    const or: Prisma.ProspectWhereInput[] = [];
+    if (channelIds.size) or.push({ youtubeChannelId: { in: [...channelIds] } });
+    if (handles.size) {
+      or.push({ channelHandle: { in: [...handles].flatMap((h) => [h, `@${h}`]) } });
+    }
+    if (url) or.push({ channelUrl: { in: [url, `${url}/`] } });
+    const handleKeys = [...handles];
+    if (handleKeys.length) or.push({ channelHandleKey: { in: handleKeys } });
+    const urlKey = channelUrlKey(url);
+    if (urlKey) or.push({ channelUrlKey: urlKey });
+    if (email) or.push({ contactEmail: email });
+    if (or.length === 0) return { exists: false, matches: [] };
+
+    const rows = await tx.prospect.findMany({
+      where: { OR: or, ...(excludeId && { id: { not: excludeId } }) },
+      orderBy: { createdAt: 'asc' },
+      take: 20,
+    });
+    const lower = (v: string | null) => v?.toLowerCase() ?? null;
+    const matches = rows.map((r) => {
+      const matchedOn: DuplicateMatchField[] = [];
+      if (r.youtubeChannelId && channelIds.has(r.youtubeChannelId))
+        matchedOn.push('youtubeChannelId');
+      if (r.channelHandle && handles.has(normalizeChannelHandle(r.channelHandle))) {
+        matchedOn.push('channelHandle');
+      }
+      if (
+        (url && lower(r.channelUrl?.replace(/\/+$/, '') ?? null) === lower(url)) ||
+        (urlKey && r.channelUrlKey === urlKey)
+      ) {
+        matchedOn.push('channelUrl');
+      }
+      if (
+        !matchedOn.includes('channelHandle') &&
+        r.channelHandleKey &&
+        handles.has(r.channelHandleKey)
+      ) {
+        matchedOn.push('channelHandle');
+      }
+      if (email && lower(r.contactEmail) === lower(email)) matchedOn.push('contactEmail');
+      return { prospect: toSummary(r), matchedOn };
+    });
+    return { exists: matches.length > 0, matches };
+  }
+
+  function toSummary(r: ProspectRow) {
+    const dto = toProspectDto(r);
+    return {
+      id: dto.id,
+      reference: dto.reference,
+      creatorName: dto.creatorName,
+      channelName: dto.channelName,
+      stage: dto.stage,
+    };
+  }
+
+  function duplicateError(found: ProspectLookupResponse): AppError {
+    const first = found.matches[0]!;
+    return new AppError(
+      ERROR_CODES.ALREADY_EXISTS,
+      `Cette chaîne a déjà un dossier : ${first.prospect.reference}`,
+      409,
+      { matches: found.matches },
+    );
+  }
+
   async function setProductionStatus(tx: Db, id: string, status: ProductionStatus) {
     await tx.prospectProduction.update({ where: { id }, data: { status, updatedAt: clock() } });
   }
@@ -292,6 +536,17 @@ export function createProspectService({
     event?: { title: string; details?: string | null },
   ) {
     const input = parseOrThrow(createProductionRequestSchema, request, 'Production');
+    // Un agent ou le système ne valide ni n'envoie jamais un e-mail : seul l'humain le fait.
+    if (
+      input.kind === 'email' &&
+      !isHumanActor(actor) &&
+      !NON_HUMAN_EMAIL_STATUSES.includes(input.status)
+    ) {
+      throw forbidden(
+        `Seul l'utilisateur humain peut donner le statut « ${input.status} » à un e-mail`,
+      );
+    }
+    await checkMissionBelongs(tx, row, input.missionId);
     const last = await tx.prospectProduction.findFirst({
       where: { prospectId: row.id, kind: input.kind },
       orderBy: { version: 'desc' },
@@ -434,10 +689,13 @@ export function createProspectService({
   async function command(
     id: string,
     run: (tx: Db, row: ProspectRow) => Promise<unknown>,
+    hook?: TransactionHook,
   ): Promise<ProspectDossier> {
     await prisma.$transaction(async (tx) => {
+      await hook?.begin(tx);
       const row = await load(tx, id);
       await run(tx, row);
+      await hook?.end(tx, { type: 'prospect', id: row.id });
     });
     return getDossier(id);
   }
@@ -486,58 +744,72 @@ export function createProspectService({
       actor: Actor,
       options: {
         discoveryMission?: Omit<CreateMissionRequest, 'prospectId' | 'priority' | 'room' | 'type'>;
+        hook?: TransactionHook;
       } = {},
     ) {
       const input = parseOrThrow(createProspectRequestSchema, request, 'Prospect');
-      const id = await prisma.$transaction(async (tx) => {
-        if (input.youtubeChannelId) {
-          const existing = await tx.prospect.findUnique({
-            where: { youtubeChannelId: input.youtubeChannelId },
-            select: { reference: true },
+      const create = () =>
+        prisma.$transaction(async (tx) => {
+          // Clé d'idempotence d'abord (écriture : n'ouvre pas encore la photo de la base),
+          // puis le numéro de dossier, puis seulement les lectures.
+          await options.hook?.begin(tx);
+          const now = clock();
+          const reference = await reserveReferenceIn(tx, now);
+          // Doublon : même identifiant YouTube, même nom de chaîne ou même adresse de chaîne.
+          const duplicates = await findDuplicatesIn(tx, {
+            youtubeChannelId: input.youtubeChannelId ?? undefined,
+            channelHandle: input.channelHandle ?? undefined,
+            channelUrl: input.channelUrl ?? undefined,
           });
-          if (existing) {
-            throw invalid(`Cette chaîne a déjà un dossier : ${existing.reference}`);
-          }
-        }
-        const now = clock();
-        const count = await tx.prospect.count();
-        const reference = `P-${now.getUTCFullYear()}-${String(count + 1).padStart(4, '0')}`;
-        const row = await tx.prospect.create({
-          data: {
-            ...input,
-            reference,
-            viewCount: input.viewCount === null ? null : BigInt(input.viewCount),
-            statsUpdatedAt: input.statsUpdatedAt ? new Date(input.statsUpdatedAt) : null,
-            discovery: input.discovery as Prisma.InputJsonObject,
-            stage: 'prospecting',
-            discoveredAt: now,
-            lastActivityAt: now,
-            createdAt: now,
-            updatedAt: now,
-          },
-        });
-        const mission = await createMissionIn(
-          tx,
-          row,
-          {
-            type: PIPELINE_MISSION_TYPES.discover,
+          if (duplicates.exists) throw duplicateError(duplicates);
+          const row = await tx.prospect.create({
+            data: {
+              ...input,
+              reference,
+              channelHandleKey: channelHandleKey(input.channelHandle, input.channelUrl),
+              channelUrlKey: channelUrlKey(input.channelUrl),
+              viewCount: input.viewCount === null ? null : BigInt(input.viewCount),
+              statsUpdatedAt: input.statsUpdatedAt ? new Date(input.statsUpdatedAt) : null,
+              discovery: input.discovery as Prisma.InputJsonObject,
+              stage: 'prospecting',
+              discoveredAt: now,
+              lastActivityAt: now,
+              createdAt: now,
+              updatedAt: now,
+            },
+          });
+          const mission = await createMissionIn(
+            tx,
+            row,
+            {
+              type: PIPELINE_MISSION_TYPES.discover,
+              room: 'prospecting',
+              agentId: actor.type === 'agent' ? actor.id : null,
+              ...options.discoveryMission,
+            },
+            actor,
+          );
+          await addEvent(tx, row.id, actor, {
+            type: 'discovered',
+            title: 'Prospect découvert',
             room: 'prospecting',
-            agentId: actor.type === 'agent' ? actor.id : null,
-            ...options.discoveryMission,
-          },
-          actor,
-        );
-        await addEvent(tx, row.id, actor, {
-          type: 'discovered',
-          title: 'Prospect découvert',
-          room: 'prospecting',
-          details: input.discovery.reason,
-          missionId: mission.id,
-          payload: { source: input.discovery.source },
+            details: input.discovery.reason,
+            missionId: mission.id,
+            payload: { source: input.discovery.source },
+          });
+          await options.hook?.end(tx, { type: 'prospect', id: row.id });
+          return row.id;
         });
-        return row.id;
-      });
-      return getDossier(id);
+      // Filet de sécurité : si la base refuse malgré tout (index unique, conflit passager entre
+      // transactions), on recommence ; la recherche de doublons tranche alors avec une erreur claire.
+      for (let attempt = 1; ; attempt++) {
+        try {
+          return await getDossier(await create());
+        } catch (error) {
+          const retry = isUniqueViolation(error) || isTransientConflict(error);
+          if (!retry || attempt >= CREATE_ATTEMPTS) throw error;
+        }
+      }
     },
 
     /** Passe le prospect à l'étape suivante et crée, si besoin, la mission de la salle. */
@@ -557,48 +829,229 @@ export function createProspectService({
     },
 
     /** Ajoute une analyse : nouvelle version, l'ancienne est conservée. */
-    async addAnalysis(id: string, request: CreateAnalysisRequest, actor: Actor) {
+    async addAnalysis(
+      id: string,
+      request: CreateAnalysisRequest,
+      actor: Actor,
+      options: CommandOptions = {},
+    ) {
       const input = parseOrThrow(createAnalysisRequestSchema, request, 'Analyse');
-      return command(id, async (tx, row) => {
-        const last = await tx.prospectAnalysis.findFirst({
-          where: { prospectId: row.id },
-          orderBy: { version: 'desc' },
-          select: { version: true },
-        });
-        const version = (last?.version ?? 0) + 1;
-        const score = computeAnalysisScore(input.scoreCriteria);
-        await tx.prospectAnalysis.create({
-          data: {
-            prospectId: row.id,
+      return command(
+        id,
+        async (tx, row) => {
+          options.guard?.(row);
+          await checkMissionBelongs(tx, row, input.missionId);
+          const last = await tx.prospectAnalysis.findFirst({
+            where: { prospectId: row.id },
+            orderBy: { version: 'desc' },
+            select: { version: true },
+          });
+          const version = (last?.version ?? 0) + 1;
+          const score = computeAnalysisScore(input.scoreCriteria);
+          await tx.prospectAnalysis.create({
+            data: {
+              prospectId: row.id,
+              missionId: input.missionId,
+              version,
+              summary: input.summary,
+              conclusion: input.conclusion,
+              score,
+              scoreCriteria: input.scoreCriteria as Prisma.InputJsonArray,
+              priority: input.priority,
+              content: input.content as Prisma.InputJsonObject,
+              sources: input.sources as Prisma.InputJsonArray,
+              actorType: actor.type,
+              actorId: actor.id,
+              createdAt: clock(),
+            },
+          });
+          await update(tx, row, { priority: input.priority });
+          await addEvent(tx, row.id, actor, {
+            type: 'analysis_added',
+            title:
+              version === 1 ? 'Analyse terminée' : `Nouvelle analyse terminée (version ${version})`,
+            room: 'analysis',
+            details: input.conclusion,
             missionId: input.missionId,
-            version,
-            summary: input.summary,
-            conclusion: input.conclusion,
-            score,
-            scoreCriteria: input.scoreCriteria as Prisma.InputJsonArray,
-            priority: input.priority,
-            content: input.content as Prisma.InputJsonObject,
-            sources: input.sources as Prisma.InputJsonArray,
-            actorType: actor.type,
-            actorId: actor.id,
-            createdAt: clock(),
-          },
-        });
-        await update(tx, row, { priority: input.priority });
-        await addEvent(tx, row.id, actor, {
-          type: 'analysis_added',
-          title:
-            version === 1 ? 'Analyse terminée' : `Nouvelle analyse terminée (version ${version})`,
-          room: 'analysis',
-          details: input.conclusion,
-          missionId: input.missionId,
-          payload: { version, score },
-        });
-      });
+            payload: { version, score },
+          });
+        },
+        options.hook,
+      );
     },
 
-    async addProduction(id: string, request: CreateProductionRequest, actor: Actor) {
-      return command(id, (tx, row) => addProductionIn(tx, row, request, actor));
+    /** Dossiers existants pour une chaîne ou un contact (vérification avant création). */
+    async findDuplicates(query: ProspectLookupQuery): Promise<ProspectLookupResponse> {
+      return findDuplicatesIn(prisma, query);
+    },
+
+    /**
+     * Passage à l'étape suivante, demandé par un agent : la mission de la nouvelle salle est
+     * créée par le serveur (validation humaine comprise), sauf si une mission y est déjà ouverte.
+     */
+    async advanceStage(
+      id: string,
+      request: AgentStageRequest,
+      actor: Actor,
+      options: CommandOptions = {},
+    ) {
+      return command(
+        id,
+        async (tx, row) => {
+          checkVersion(row, request.expectedVersion);
+          options.guard?.(row);
+          const updated = await moveToStageIn(tx, row, request.to, actor, {
+            details: request.details ?? null,
+          });
+          const mission = STAGE_MISSIONS[request.to];
+          if (mission && !(await openMissionIn(tx, row.id, mission.room))) {
+            await createMissionIn(tx, updated, mission, SYSTEM);
+          }
+        },
+        options.hook,
+      );
+    },
+
+    /**
+     * Complète les informations d'un prospect. Seuls les champs réellement modifiés sont
+     * enregistrés, avec leur ancienne et leur nouvelle valeur ; rien à modifier = rien d'écrit.
+     */
+    async enrichProspect(
+      id: string,
+      request: EnrichProspectRequest,
+      actor: Actor,
+      options: CommandOptions = {},
+    ) {
+      try {
+        return await command(
+          id,
+          async (tx, row) => {
+            checkVersion(row, request.expectedVersion);
+            const { expectedVersion: _version, ...fields } = request;
+
+            if (fields.youtubeChannelId !== undefined) {
+              if (row.youtubeChannelId && row.youtubeChannelId !== fields.youtubeChannelId) {
+                throw invalid(
+                  `Le dossier ${row.reference} a déjà un identifiant YouTube : il ne peut pas changer`,
+                );
+              }
+            }
+            if (fields.youtubeChannelId || fields.channelHandle || fields.channelUrl) {
+              const duplicates = await findDuplicatesIn(
+                tx,
+                {
+                  youtubeChannelId: fields.youtubeChannelId,
+                  channelHandle: fields.channelHandle ?? undefined,
+                  channelUrl: fields.channelUrl ?? undefined,
+                },
+                row.id,
+              );
+              if (duplicates.exists) throw duplicateError(duplicates);
+            }
+
+            const statsChanged = ['subscriberCount', 'viewCount', 'videoCount'].some(
+              (k) => k in fields,
+            );
+            const next: Record<string, unknown> = { ...fields };
+            if ('viewCount' in fields) {
+              next.viewCount = fields.viewCount === null ? null : BigInt(fields.viewCount!);
+            }
+            if ('channelHandle' in fields || 'channelUrl' in fields) {
+              const handle = 'channelHandle' in fields ? fields.channelHandle : row.channelHandle;
+              const url = 'channelUrl' in fields ? fields.channelUrl : row.channelUrl;
+              next.channelHandleKey = channelHandleKey(handle, url);
+              next.channelUrlKey = channelUrlKey(url);
+            }
+            if (statsChanged || fields.statsUpdatedAt) {
+              next.statsUpdatedAt = fields.statsUpdatedAt
+                ? new Date(fields.statsUpdatedAt)
+                : clock();
+            }
+
+            const changes: Record<
+              string,
+              { from: Prisma.InputJsonValue | null; to: Prisma.InputJsonValue | null }
+            > = {};
+            for (const [field, to] of Object.entries(next)) {
+              const from = toJsonable(row[field as keyof ProspectRow]);
+              const value = toJsonable(to);
+              if (JSON.stringify(from) !== JSON.stringify(value))
+                changes[field] = { from, to: value };
+            }
+            if (Object.keys(changes).length === 0) return;
+
+            const patch = Object.fromEntries(
+              Object.keys(changes).map((field) => [field, next[field]]),
+            ) as Prisma.ProspectUpdateManyMutationInput;
+            await update(tx, row, patch);
+            await addEvent(tx, row.id, actor, {
+              type: 'prospect_enriched',
+              title: 'Informations complétées',
+              details: Object.keys(changes)
+                .map((f) => ENRICHABLE_FIELD_LABELS[f] ?? f)
+                .join(', '),
+              room: PROSPECT_STAGE_ROOMS[row.stage as ProspectStage],
+              payload: { changes } as Prisma.InputJsonObject,
+            });
+          },
+          options.hook,
+        );
+      } catch (error) {
+        // Une autre écriture vient de donner ce nom ou cette adresse à un autre dossier :
+        // la base l'a refusé (index unique), on répond comme pour un doublon détecté.
+        if (!isUniqueViolation(error)) throw error;
+        const found = await findDuplicatesIn(
+          prisma,
+          {
+            channelHandle: request.channelHandle ?? undefined,
+            channelUrl: request.channelUrl ?? undefined,
+          },
+          id,
+        );
+        if (found.exists) throw duplicateError(found);
+        throw new AppError(ERROR_CODES.ALREADY_EXISTS, 'Cette chaîne a déjà un dossier', 409);
+      }
+    },
+
+    /** Activité signalée par un agent dans l'historique (titre libre, type fixé par le serveur). */
+    async logActivity(
+      id: string,
+      request: AgentEventRequest,
+      actor: Actor,
+      options: CommandOptions = {},
+    ) {
+      return command(
+        id,
+        async (tx, row) => {
+          await checkMissionBelongs(tx, row, request.missionId ?? null);
+          await update(tx, row, {});
+          await addEvent(tx, row.id, actor, {
+            type: 'agent_activity',
+            title: request.title,
+            details: request.details ?? null,
+            room: PROSPECT_STAGE_ROOMS[row.stage as ProspectStage],
+            missionId: request.missionId ?? null,
+            payload: (request.payload ?? {}) as Prisma.InputJsonObject,
+          });
+        },
+        options.hook,
+      );
+    },
+
+    async addProduction(
+      id: string,
+      request: CreateProductionRequest,
+      actor: Actor,
+      options: CommandOptions = {},
+    ) {
+      return command(
+        id,
+        (tx, row) => {
+          options.guard?.(row);
+          return addProductionIn(tx, row, request, actor);
+        },
+        options.hook,
+      );
     },
 
     /** Enregistre un message déjà échangé (scénario de démonstration, import). */
@@ -625,6 +1078,7 @@ export function createProspectService({
 
     /** Mon bureau : valider, refuser ou faire réanalyser un prospect. */
     async decideProspect(id: string, request: ProspectDecisionRequest, actor: Actor) {
+      assertHumanActor(actor, 'valider, refuser ou faire réanalyser un prospect');
       return command(id, async (tx, row) => {
         checkVersion(row, request.expectedVersion);
         const mission = await loadMissionOf(tx, row, request.missionId, 'director');
@@ -709,6 +1163,7 @@ export function createProspectService({
 
     /** Salle de validation : valider, refuser ou faire corriger un e-mail. Rien n'est envoyé. */
     async decideEmail(id: string, request: EmailDecisionRequest, actor: Actor) {
+      assertHumanActor(actor, 'valider, refuser ou faire corriger un e-mail');
       return command(id, async (tx, row) => {
         checkVersion(row, request.expectedVersion);
         const mission = await loadMissionOf(tx, row, request.missionId, 'email_review');
@@ -831,6 +1286,7 @@ export function createProspectService({
 
     /** Marque l'e-mail validé comme envoyé. SIMULATION : aucun e-mail réel ne part. */
     async simulateSend(id: string, request: { productionId: string }, actor: Actor) {
+      assertHumanActor(actor, 'envoyer un e-mail');
       if (!simulationMode) {
         throw AppError.externalActionBlocked(
           'envoi d’e-mail (aucune intégration e-mail réelle n’est disponible)',
@@ -917,6 +1373,7 @@ export function createProspectService({
 
     /** Relance. SIMULATION : refusée si le prospect ne doit plus être contacté. */
     async sendFollowup(id: string, request: FollowupMessageRequest, actor: Actor) {
+      assertHumanActor(actor, 'envoyer une relance');
       if (!simulationMode) {
         throw AppError.externalActionBlocked('relance par e-mail (aucune intégration réelle)');
       }
