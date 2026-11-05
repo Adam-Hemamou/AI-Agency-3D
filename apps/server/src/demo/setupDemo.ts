@@ -2,7 +2,8 @@ import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { config as loadDotenv } from 'dotenv';
 import mariadb from 'mariadb';
-import { databaseName, resolveDemoDatabaseUrl } from '../config/demo.ts';
+import { createOwnerAuthService } from '../auth/ownerAuth.ts';
+import { DEMO_OWNER_PASSWORD, databaseName, resolveDemoDatabaseUrl } from '../config/demo.ts';
 import { createPrismaClient } from '../db/prisma.ts';
 import { seedDemo } from './scenario.ts';
 
@@ -54,7 +55,9 @@ try {
   console.log(
     `Scénario fictif chargé : ${counts.prospects} prospects, ${counts.missions} missions, ${counts.events} événements.`,
   );
+  await createOwnerAuthService({ prisma }).setPassword(DEMO_OWNER_PASSWORD);
   console.log('Lancez « npm run dev:demo » puis ouvrez http://localhost:5174');
+  console.log(`Mot de passe de la démonstration : ${DEMO_OWNER_PASSWORD}`);
 } finally {
   await prisma.$disconnect();
 }

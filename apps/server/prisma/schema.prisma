@@ -34,7 +34,8 @@ model Mission {
   validationOutcome  String?   @map("validation_outcome") @db.VarChar(32)
   validatedAt        DateTime? @map("validated_at") @db.DateTime(3)
   validatedBy        String?   @map("validated_by") @db.VarChar(64)
-  /// Agent responsable. La table des agents sera créée avec les agents ; pas de clé étrangère d'ici là.
+  /// Agent responsable (identifiant d'agent). Pas de clé étrangère : les missions existantes peuvent
+  /// citer des agents qui n'ont pas (encore) d'identité enregistrée.
   agentId            String?   @map("agent_id") @db.VarChar(64)
   /// Nombre de démarrages effectués (une reprise après pause n'en est pas un).
   attemptCount       Int       @default(0) @map("attempt_count")
@@ -87,6 +88,95 @@ model MissionEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Agents IA : identité et clés API. Seul le service des agents écrit dans ces tables.
+// ---------------------------------------------------------------------------
+
+/// Un agent IA de l'agence. Son identifiant commence toujours par "agent-" (agentIdSchema).
+model Agent {
+  /// Ex. "agent-prospecteur". Repris tel quel dans les colonnes actor_id de l'historique.
+  id          String   @id @db.VarChar(64)
+  name        String   @db.VarChar(120)
+  description String?  @db.Text
+  /// Salle de rattachement (ROOM_IDS), facultative.
+  room        String?  @db.VarChar(32)
+  /// AGENT_STATUSES. "disabled" : toutes ses clés sont refusées.
+  status      String   @default("active") @db.VarChar(16)
+  createdAt   DateTime @map("created_at") @db.DateTime(3)
+  updatedAt   DateTime @map("updated_at") @db.DateTime(3)
+
+  apiKeys     AgentApiKey[]
+  permissions AgentPermission[]
+  requests    AgentRequest[]
+
+  @@map("agents")
+}
+
+/// Clé API d'un agent. Le secret n'est jamais stocké : seule son empreinte SHA-256 l'est.
+model AgentApiKey {
+  id         String    @id @default(uuid(7)) @db.Char(36)
+  agentId    String    @map("agent_id") @db.VarChar(64)
+  /// Partie publique de la clé ("agk_" + 12 caractères) : sert à la retrouver sans la révéler.
+  prefix     String    @unique @db.VarChar(24)
+  /// Empreinte SHA-256 (hexadécimal) de la clé complète.
+  secretHash String    @map("secret_hash") @db.Char(64)
+  label      String?   @db.VarChar(120)
+  createdAt  DateTime  @map("created_at") @db.DateTime(3)
+  expiresAt  DateTime? @map("expires_at") @db.DateTime(3)
+  lastUsedAt DateTime? @map("last_used_at") @db.DateTime(3)
+  /// Une clé révoquée ne peut jamais être réactivée.
+  revokedAt  DateTime? @map("revoked_at") @db.DateTime(3)
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([agentId])
+  @@map("agent_api_keys")
+}
+
+/// Permission accordée à un agent par l'utilisateur (AGENT_PERMISSIONS). Aucune par défaut.
+model AgentPermission {
+  agentId    String   @map("agent_id") @db.VarChar(64)
+  permission String   @db.VarChar(48)
+  grantedAt  DateTime @map("granted_at") @db.DateTime(3)
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([agentId, permission])
+  @@map("agent_permissions")
+}
+
+/// Écriture demandée par un agent, identifiée par sa clé d'idempotence (en-tête Idempotency-Key).
+/// Une requête répétée avec la même clé renvoie la réponse enregistrée, sans nouvelle exécution.
+model AgentRequest {
+  id             Int       @id @default(autoincrement())
+  agentId        String    @map("agent_id") @db.VarChar(64)
+  idempotencyKey String    @map("idempotency_key") @db.VarChar(128)
+  /// Empreinte SHA-256 de la méthode, du chemin et du corps : la même clé ne sert qu'à une requête.
+  requestHash    String    @map("request_hash") @db.Char(64)
+  method         String    @db.VarChar(8)
+  path           String    @db.VarChar(500)
+  /// "completed" (lot C : enregistrée dans la transaction de l'écriture, donc jamais à moitié).
+  /// "processing" ne subsiste que pour des requêtes interrompues avant le lot C.
+  status         String    @db.VarChar(16)
+  responseStatus Int?      @map("response_status")
+  /// Ancienne version (étape 2) : réponse complète enregistrée. Plus écrite ; lue seulement pour les
+  /// requêtes enregistrées avant le lot C, effacées au bout de 7 jours.
+  responseBody   Json?     @map("response_body")
+  /// Ressource écrite par la requête ("prospect" ou "mission") : une répétition renvoie son état actuel.
+  resourceType   String?   @map("resource_type") @db.VarChar(16)
+  resourceId     String?   @map("resource_id") @db.VarChar(36)
+  /// Pour une mission : l'événement d'historique produit.
+  eventId        Int?      @map("event_id")
+  createdAt      DateTime  @map("created_at") @db.DateTime(3)
+  completedAt    DateTime? @map("completed_at") @db.DateTime(3)
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([agentId, idempotencyKey])
+  @@index([createdAt])
+  @@map("agent_requests")
+}
+
+// ---------------------------------------------------------------------------
 // CRM : un dossier unique par prospect, enrichi salle après salle.
 // Seul le service des prospects écrit dans ces tables.
 // ---------------------------------------------------------------------------
@@ -102,6 +192,10 @@ model Prospect {
   /// Identifiant YouTube de la chaîne : empêche de créer deux dossiers pour la même chaîne.
   youtubeChannelId   String?   @unique @map("youtube_channel_id") @db.VarChar(64)
   channelUrl         String?   @map("channel_url") @db.VarChar(500)
+  /// Nom de chaîne normalisé (channelHandleKey) : deux dossiers ne peuvent pas avoir le même.
+  channelHandleKey   String?   @unique @map("channel_handle_key") @db.VarChar(120)
+  /// Adresse de chaîne normalisée (channelUrlKey) : deux dossiers ne peuvent pas avoir la même.
+  channelUrlKey      String?   @unique @map("channel_url_key") @db.VarChar(500)
   avatarUrl          String?   @map("avatar_url") @db.VarChar(500)
   category           String?   @db.VarChar(80)
   description        String?   @db.Text
@@ -145,6 +239,15 @@ model Prospect {
   @@index([stage, priority])
   @@index([lastActivityAt])
   @@map("prospects")
+}
+
+/// Dernier numéro de dossier attribué, par année (P-AAAA-NNNN). Ligne verrouillée pendant une création :
+/// deux créations simultanées ne peuvent pas recevoir le même numéro.
+model ProspectCounter {
+  year       Int @id
+  lastNumber Int @map("last_number")
+
+  @@map("prospect_counters")
 }
 
 /// Résultat d'une analyse. Jamais modifié : une nouvelle analyse crée une nouvelle version.
@@ -256,4 +359,57 @@ model ProspectEvent {
 
   @@index([prospectId, createdAt])
   @@map("prospect_events")
+}
+
+// ---------------------------------------------------------------------------
+// Utilisateur humain : mot de passe administrateur et sessions.
+// Seul le service d'authentification écrit dans ces tables.
+// ---------------------------------------------------------------------------
+
+/// Mot de passe administrateur (une seule ligne, id "owner"). Seule son empreinte scrypt est stockée.
+model OwnerCredential {
+  id           String   @id @db.VarChar(16)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  updatedAt    DateTime @map("updated_at") @db.DateTime(3)
+
+  @@map("owner_credentials")
+}
+
+/// Session humaine ouverte par le mot de passe. Le jeton n'est jamais stocké : seulement son empreinte.
+model OwnerSession {
+  id         String    @id @default(uuid(7)) @db.Char(36)
+  tokenHash  String    @unique @map("token_hash") @db.Char(64)
+  createdAt  DateTime  @map("created_at") @db.DateTime(3)
+  /// Fin fixe : 12 heures après la connexion.
+  expiresAt  DateTime  @map("expires_at") @db.DateTime(3)
+  lastSeenAt DateTime  @map("last_seen_at") @db.DateTime(3)
+  /// Déconnexion, ou changement du mot de passe.
+  revokedAt  DateTime? @map("revoked_at") @db.DateTime(3)
+
+  @@index([expiresAt])
+  @@map("owner_sessions")
+}
+
+/// Quotas journaliers GLOBAUX des agents (tous agents confondus) : une ligne par jour et par action.
+/// Incrémentée dans la transaction de l'écriture, ligne verrouillée jusqu'à la fin : limite exacte
+/// même sous requêtes simultanées, et une écriture annulée n'est pas comptée.
+model AgentQuotaUsage {
+  /// Jour calendaire, heure de Paris (AAAA-MM-JJ).
+  day    String @db.VarChar(10)
+  /// AGENT_QUOTA_ACTIONS.
+  action String @db.VarChar(32)
+  used   Int
+
+  @@id([day, action])
+  @@map("agent_quota_usage")
+}
+
+/// Interrupteur d'arrêt d'urgence des agents, réglé par l'utilisateur (une seule ligne, id "global").
+/// Conservé en base : un redémarrage ne réactive pas des agents arrêtés.
+model AgentSwitch {
+  id        String   @id @db.VarChar(16)
+  enabled   Boolean
+  updatedAt DateTime @map("updated_at") @db.DateTime(3)
+
+  @@map("agent_switch")
 }

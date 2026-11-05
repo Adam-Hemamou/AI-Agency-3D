@@ -6,6 +6,7 @@ import {
   Card,
   Chips,
   EmptyState,
+  ExternalLink,
   Field,
   Fields,
   ProductionBadge,
@@ -54,13 +55,7 @@ export function CommercialSection({ dossier }: { dossier: ProspectDossier }) {
             <Field label="Langues">
               <Chips items={c.languages} />
             </Field>
-            <Field label="Démonstration">
-              {c.demoUrl && (
-                <a href={c.demoUrl} target="_blank" rel="noreferrer noopener">
-                  {c.demoUrl.replace(/^https?:\/\//, '')}
-                </a>
-              )}
-            </Field>
+            <Field label="Démonstration">{c.demoUrl && <ExternalLink url={c.demoUrl} />}</Field>
             <Field label="Version">
               v{proposal.version} · {formatDateTime(proposal.createdAt)} ·{' '}
               {actorLabel(proposal.actorType, proposal.actorId)}

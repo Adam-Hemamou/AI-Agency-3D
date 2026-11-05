@@ -18,6 +18,22 @@ export const ERROR_CODES = {
   FORBIDDEN_ACTOR: 'FORBIDDEN_ACTOR',
   /** La mission a été modifiée entre-temps (version attendue différente). */
   CONCURRENT_MODIFICATION: 'CONCURRENT_MODIFICATION',
+  /** Requête sans identité valide : clé API d'agent absente, invalide, expirée ou révoquée. */
+  UNAUTHENTICATED: 'UNAUTHENTICATED',
+  /** La ressource à créer existe déjà (ex. : un agent avec le même identifiant). */
+  ALREADY_EXISTS: 'ALREADY_EXISTS',
+  /** Clé d'idempotence déjà utilisée pour une autre requête, ou requête identique encore en cours. */
+  IDEMPOTENCY_CONFLICT: 'IDEMPOTENCY_CONFLICT',
+  /** Trop de tentatives ou de requêtes : réessayer après le délai indiqué (en-tête Retry-After). */
+  RATE_LIMITED: 'RATE_LIMITED',
+  /** Requête venant d'un autre site ou d'une adresse non autorisée (en-têtes Host / Origin). */
+  FORBIDDEN_ORIGIN: 'FORBIDDEN_ORIGIN',
+  /** Aucun mot de passe administrateur défini : lancer « npm run owner:password ». */
+  OWNER_PASSWORD_NOT_SET: 'OWNER_PASSWORD_NOT_SET',
+  /** Quota journalier des agents atteint (global, tous agents confondus) : réessayer le lendemain. */
+  QUOTA_EXCEEDED: 'QUOTA_EXCEEDED',
+  /** Arrêt d'urgence : les agents sont désactivés (AGENTS_ENABLED=false ou interrupteur de l'interface). */
+  AGENTS_DISABLED: 'AGENTS_DISABLED',
   /** Contact interdit : le prospect a refusé ou demandé à ne plus être contacté. */
   CONTACT_NOT_ALLOWED: 'CONTACT_NOT_ALLOWED',
   INTERNAL_ERROR: 'INTERNAL_ERROR',

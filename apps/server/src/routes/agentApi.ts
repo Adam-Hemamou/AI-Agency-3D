@@ -1,0 +1,359 @@
+import { Router, type Response } from 'express';
+import {
+  AGENT_ANALYSIS_STAGES,
+  AGENT_STAGE_TRANSITIONS,
+  ERROR_CODES,
+  PROSPECT_STAGE_LABELS,
+  PROSPECT_STAGE_ROOMS,
+  ROOM_LABELS,
+  agentEventRequestSchema,
+  agentProductionsAt,
+  agentStageRequestSchema,
+  PRODUCTION_READ_PERMISSION,
+  checkAgentProduction,
+  missionListQuerySchema,
+  createAnalysisRequestSchema,
+  createProductionRequestSchema,
+  createProspectRequestSchema,
+  enrichProspectRequestSchema,
+  hasChannelIdentifier,
+  missionTransitionRequestSchema,
+  prospectLookupQuerySchema,
+  type AgentProspectContext,
+  type AgentQuotaAction,
+  type ProductionKind,
+  type ProductionStatus,
+  type ProspectStage,
+  type RoomId,
+} from '@agency/shared';
+import type { AuthenticatedAgent } from '../agents/agentService.ts';
+import type { AgentControl } from '../agents/agentControl.ts';
+import { toAgentDossier } from '../agents/agentView.ts';
+import type { QuotaService } from '../agents/quotas.ts';
+import {
+  idempotentCommand,
+  type IdempotencyStore,
+  type IdempotentCommand,
+} from '../agents/idempotency.ts';
+import type { WriteResource } from '../db/transactionHook.ts';
+import { AppError } from '../errors/AppError.ts';
+import { parseOrThrow } from '../lib/validate.ts';
+import type { MissionService } from '../missions/missionService.ts';
+import type { ProspectService } from '../prospects/prospectService.ts';
+
+/**
+ * API réservée aux agents IA (/api/agent/…).
+ *
+ * - L'auteur de chaque action est l'agent authentifié par sa clé (jamais une valeur de la requête).
+ * - La permission exigée par chaque route est vérifiée en amont (agentAccessGuard).
+ * - Les règles propres aux agents (étapes, productions, salle, missions attribuées) sont
+ *   vérifiées ici, dans la transaction du service quand c'est possible.
+ * - Toute écriture exige un en-tête Idempotency-Key : une requête répétée n'est exécutée qu'une fois.
+ * - Aucune route ne valide, ne décide ni n'envoie : ces actions restent à l'utilisateur.
+ */
+
+export interface AgentApiDeps {
+  prospects: ProspectService;
+  missions: MissionService;
+  idempotency: IdempotencyStore;
+  /** Quotas journaliers globaux. */
+  quotas: QuotaService;
+  /** Arrêt d'urgence, revérifié dans la transaction de chaque écriture. */
+  control: AgentControl;
+}
+
+function forbidden(message: string): AppError {
+  return new AppError(ERROR_CODES.FORBIDDEN_ACTOR, message, 403);
+}
+
+function agentOf(res: Response): AuthenticatedAgent {
+  const agent = res.locals.agent;
+  if (!agent) {
+    throw forbidden(
+      'Route réservée aux agents : présentez une clé API (Authorization: Bearer <clé>)',
+    );
+  }
+  return agent;
+}
+
+/** Étapes vers lesquelles CET agent peut faire passer un dossier (salle de l'agent comprise). */
+function allowedStagesFor(agent: AuthenticatedAgent, stage: ProspectStage): ProspectStage[] {
+  if (!agent.permissions.has('stages:advance')) return [];
+  if (agent.agent.room && PROSPECT_STAGE_ROOMS[stage] !== agent.agent.room) return [];
+  return [...(AGENT_STAGE_TRANSITIONS[stage] ?? [])];
+}
+
+export function agentApiRouter({
+  prospects,
+  missions,
+  idempotency,
+  quotas,
+  control,
+}: AgentApiDeps): Router {
+  const router = Router();
+  /**
+   * Écriture d'agent : idempotente, et contrôlée DANS sa transaction (arrêt d'urgence, puis quota
+   * global éventuel). Un refus annule tout : aucune donnée ni aucun compteur n'est modifié.
+   */
+  const command = (definition: IdempotentCommand, quota?: AgentQuotaAction) =>
+    idempotentCommand(idempotency, {
+      ...definition,
+      beforeWrite: async (tx) => {
+        control.assertEnabled();
+        if (quota) await quotas.consume(tx, quota);
+      },
+    });
+  /**
+   * Réponse des écritures sur un dossier : son état actuel, filtré selon les permissions
+   * actuelles de l'agent (première réponse comme répétition).
+   */
+  const renderDossier = async (resource: WriteResource, res: Response) =>
+    toAgentDossier(await prospects.getDossier(resource.id), agentOf(res).permissions);
+
+  // Aucune de ces routes n'est accessible à l'utilisateur humain : elles parlent au nom d'un agent.
+  router.use((_req, res, next) => {
+    agentOf(res);
+    next();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Lecture
+  // ---------------------------------------------------------------------------
+
+  router.get('/prospects/lookup', async (req, res) => {
+    const query = parseOrThrow(prospectLookupQuerySchema, req.query, 'Recherche de doublons');
+    // Chercher par e-mail révèle à qui appartient une adresse : réservé aux coordonnées.
+    if (query.contactEmail && !agentOf(res).permissions.has('prospects:read_contact')) {
+      throw forbidden(
+        'Recherche par e-mail réservée aux agents autorisés à lire les coordonnées (prospects:read_contact)',
+      );
+    }
+    res.json(await prospects.findDuplicates(query));
+  });
+
+  /**
+   * Missions, pour les agents : sans historique (les événements portent les motifs des décisions
+   * humaines). Un agent rattaché à une salle ne voit que les missions de sa salle.
+   */
+  router.get('/missions', async (req, res) => {
+    const agent = agentOf(res);
+    const query = parseOrThrow(missionListQuerySchema, req.query, 'Filtres de recherche');
+    const room = agent.agent.room as RoomId | null;
+    if (room && query.room && query.room.some((r) => r !== room)) {
+      throw forbidden(`Cet agent ne voit que les missions de sa salle (${ROOM_LABELS[room]})`);
+    }
+    res.json(await missions.list(room ? { ...query, room: [room] } : query));
+  });
+
+  router.get('/missions/:id', async (req, res) => {
+    const agent = agentOf(res);
+    const mission = await missions.get(req.params.id);
+    if (agent.agent.room && mission.room !== agent.agent.room) {
+      throw forbidden('Cette mission appartient à une autre salle');
+    }
+    res.json(mission);
+  });
+
+  router.get('/prospects/:id/context', async (req, res) => {
+    const agent = agentOf(res);
+    const dossier = await prospects.getDossier(req.params.id);
+    const { stage } = dossier.prospect;
+    const body: AgentProspectContext = {
+      dossier: toAgentDossier(dossier, agent.permissions),
+      workflow: {
+        stage,
+        room: PROSPECT_STAGE_ROOMS[stage],
+        allowedStages: allowedStagesFor(agent, stage),
+        canAddAnalysis:
+          agent.permissions.has('analyses:write') && AGENT_ANALYSIS_STAGES.includes(stage),
+        allowedProductions: agent.permissions.has('productions:write')
+          ? agentProductionsAt(stage).filter((x) =>
+              agent.permissions.has(PRODUCTION_READ_PERMISSION[x.kind]),
+            )
+          : [],
+        doNotContact: dossier.prospect.doNotContact,
+      },
+    };
+    res.json(body);
+  });
+
+  /** Consommation des quotas globaux du jour (pour que n8n sache s'il peut continuer). */
+  router.get('/quotas', async (_req, res) => {
+    res.json(await quotas.status());
+  });
+
+  // ---------------------------------------------------------------------------
+  // Écritures (toutes rejouables sans effet grâce à Idempotency-Key)
+  // ---------------------------------------------------------------------------
+
+  /** Agents : un prospect n'est jamais une donnée de démonstration. */
+  const agentProspectSchema = createProspectRequestSchema
+    .omit({ isDemo: true })
+    // Sans identifiant de chaîne, impossible de détecter un doublon : refusé.
+    .refine(hasChannelIdentifier, {
+      error: 'Indiquez au moins youtubeChannelId, channelHandle ou channelUrl',
+      path: ['channelHandle'],
+    });
+
+  router.post(
+    '/prospects',
+    command(
+      {
+        status: 201,
+        render: renderDossier,
+        execute: async (req, res, hook) => {
+          const agent = agentOf(res);
+          const input = parseOrThrow(agentProspectSchema, req.body, 'Prospect');
+          // L'auteur de la découverte est fixé par le serveur, pas déclaré par l'agent.
+          const request = {
+            ...input,
+            discovery: { ...input.discovery, discoveredBy: agent.agent.id },
+          };
+          await prospects.createProspect(request, agent.actor, { hook });
+        },
+      },
+      'prospect_create',
+    ),
+  );
+
+  router.patch(
+    '/prospects/:id',
+    command(
+      {
+        status: 200,
+        render: renderDossier,
+        execute: async (req, res, hook) => {
+          const request = parseOrThrow(enrichProspectRequestSchema, req.body, 'Enrichissement');
+          const touchesContact = ['contactEmail', 'contactName', 'contactSource'].some(
+            (field) => field in request,
+          );
+          if (touchesContact && !agentOf(res).permissions.has('prospects:read_contact')) {
+            throw forbidden(
+              'Modifier les coordonnées exige de pouvoir les lire (prospects:read_contact)',
+            );
+          }
+          await prospects.enrichProspect(String(req.params.id), request, agentOf(res).actor, {
+            hook,
+          });
+        },
+      },
+      'prospect_enrich',
+    ),
+  );
+
+  router.post(
+    '/prospects/:id/analyses',
+    command({
+      status: 201,
+      render: renderDossier,
+      execute: async (req, res, hook) => {
+        const request = parseOrThrow(createAnalysisRequestSchema, req.body, 'Analyse');
+        await prospects.addAnalysis(String(req.params.id), request, agentOf(res).actor, {
+          hook,
+          guard: (row) => {
+            if (!AGENT_ANALYSIS_STAGES.includes(row.stage as ProspectStage)) {
+              throw forbidden(
+                `Analyse impossible à l'étape « ${PROSPECT_STAGE_LABELS[row.stage as ProspectStage]} »`,
+              );
+            }
+          },
+        });
+      },
+    }),
+  );
+
+  router.post(
+    '/prospects/:id/productions',
+    command(
+      {
+        status: 201,
+        render: renderDossier,
+        execute: async (req, res, hook) => {
+          const request = parseOrThrow(createProductionRequestSchema, req.body, 'Production');
+          const kind = request.kind as ProductionKind;
+          const status = request.status as ProductionStatus;
+          const readPermission = PRODUCTION_READ_PERMISSION[kind];
+          if (!agentOf(res).permissions.has(readPermission)) {
+            throw forbidden(
+              `Production « ${kind} » réservée aux agents autorisés à la lire (${readPermission})`,
+            );
+          }
+          await prospects.addProduction(String(req.params.id), request, agentOf(res).actor, {
+            hook,
+            guard: (row) => {
+              const check = checkAgentProduction(row.stage as ProspectStage, kind, status);
+              if (!check.allowed) throw forbidden(check.reason);
+            },
+          });
+        },
+      },
+      'production_create',
+    ),
+  );
+
+  router.post(
+    '/prospects/:id/stage',
+    command({
+      status: 200,
+      render: renderDossier,
+      execute: async (req, res, hook) => {
+        const agent = agentOf(res);
+        const request = parseOrThrow(agentStageRequestSchema, req.body, 'Changement d’étape');
+        await prospects.advanceStage(String(req.params.id), request, agent.actor, {
+          hook,
+          guard: (row) => {
+            const room = PROSPECT_STAGE_ROOMS[row.stage as ProspectStage];
+            if (agent.agent.room && room !== agent.agent.room) {
+              throw forbidden(
+                `Cet agent travaille en « ${ROOM_LABELS[agent.agent.room as RoomId] ?? agent.agent.room} » : il ne peut pas faire avancer un dossier d'une autre salle`,
+              );
+            }
+          },
+        });
+      },
+    }),
+  );
+
+  router.post(
+    '/prospects/:id/events',
+    command({
+      status: 201,
+      render: renderDossier,
+      execute: async (req, res, hook) => {
+        const request = parseOrThrow(agentEventRequestSchema, req.body, 'Activité');
+        await prospects.logActivity(String(req.params.id), request, agentOf(res).actor, { hook });
+      },
+    }),
+  );
+
+  /**
+   * Transitions de mission : uniquement sur une mission attribuée à l'agent ou libre,
+   * et de sa salle s'il en a une. Le moteur refuse en outre annuler et débloquer.
+   */
+  router.post(
+    '/missions/:id/transitions',
+    command({
+      status: 200,
+      render: async (resource) => ({
+        mission: await missions.get(resource.id),
+        event: await missions.event(resource.id, resource.eventId!),
+      }),
+      execute: async (req, res, hook) => {
+        const agent = agentOf(res);
+        const request = parseOrThrow(missionTransitionRequestSchema, req.body, 'Transition');
+        const mission = await missions.get(String(req.params.id));
+        if (mission.agentId !== null && mission.agentId !== agent.agent.id) {
+          throw forbidden(`Cette mission est attribuée à un autre agent (${mission.agentId})`);
+        }
+        if (agent.agent.room && mission.room !== agent.agent.room) {
+          throw forbidden(
+            `Cette mission appartient à une autre salle (${ROOM_LABELS[mission.room as RoomId] ?? mission.room})`,
+          );
+        }
+        await missions.applyAction(mission.id, request, agent.actor, { hook });
+      },
+    }),
+  );
+
+  return router;
+}

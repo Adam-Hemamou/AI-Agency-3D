@@ -24,28 +24,40 @@ cp .env.example .env
 # 3. Démarrer MySQL
 npm run db:up
 
-# 4. Lancer l'API et l'interface
+# 4. Appliquer les migrations (crée les tables, dont celles de la connexion)
+npm run db:migrate
+
+# 5. Définir le mot de passe administrateur (saisi sans être affiché, 12 caractères minimum)
+npm run owner:password
+
+# 6. Lancer l'API et l'interface
 npm run dev
 ```
 
-Ouvrir ensuite **http://localhost:5173** : l’agence 3D s’affiche. Le bouton « Système » (en haut à gauche) doit afficher trois voyants verts :
+Ouvrir ensuite **http://localhost:5173**, se connecter avec ce mot de passe : l’agence 3D s’affiche.
+La session dure **12 heures** ; le bouton « Se déconnecter » la ferme. Mot de passe oublié : relancer
+`npm run owner:password` (toutes les sessions ouvertes sont alors fermées).
+
+Le bouton « Système » (en haut à gauche) doit afficher trois voyants verts :
 API en ligne, base de données connectée, mode simulation actif.
 
 ## Commandes utiles
 
-| Commande                            | Effet                                              |
-| ----------------------------------- | -------------------------------------------------- |
-| `npm run dev`                       | Lance l'API (port 3001) et l'interface (port 5173) |
-| `npm run preview -w @agency/web`    | Aperçu du build de production (port 4173)          |
-| `npm run check`                     | Vérifie les types, le lint et les tests            |
-| `npm test`                          | Lance tous les tests (MySQL doit être démarré)     |
-| `npm run lint` / `npm run format`   | Lint / formatage automatique                       |
-| `npm run db:up` / `npm run db:down` | Démarre / arrête MySQL                             |
-| `npm run db:logs`                   | Journaux MySQL                                     |
-| `npm run db:migrate`                | Crée et applique une migration Prisma              |
-| `npm run db:studio`                 | Explorateur visuel de la base                      |
-| `npm run demo:setup`                | (Re)crée la base de démonstration fictive          |
-| `npm run dev:demo`                  | Démo : API (port 3101) et interface (port 5174)    |
+| Commande                            | Effet                                                           |
+| ----------------------------------- | --------------------------------------------------------------- |
+| `npm run dev`                       | Lance l'API (port 3001) et l'interface (port 5173)              |
+| `npm run preview -w @agency/web`    | Aperçu du build de production (port 4173)                       |
+| `npm run check`                     | Vérifie les types, le lint et les tests                         |
+| `npm test`                          | Lance tous les tests (MySQL doit être démarré)                  |
+| `npm run lint` / `npm run format`   | Lint / formatage automatique                                    |
+| `npm run db:up` / `npm run db:down` | Démarre / arrête MySQL                                          |
+| `npm run db:logs`                   | Journaux MySQL                                                  |
+| `npm run db:migrate`                | Crée et applique une migration Prisma                           |
+| `npm run db:studio`                 | Explorateur visuel de la base                                   |
+| `npm run demo:setup`                | (Re)crée la base de démonstration fictive                       |
+| `npm run owner:password`            | Définit le mot de passe administrateur (`-- --demo` : démo)     |
+| `npm run db:check-duplicates`       | Signale les dossiers en double (lecture seule, avant migration) |
+| `npm run dev:demo`                  | Démo : API (port 3101) et interface (port 5174)                 |
 
 ## Organisation
 
@@ -78,6 +90,9 @@ npm run demo:setup   # crée ai_agency_demo et y charge 13 prospects fictifs
 npm run dev:demo     # puis ouvrir http://localhost:5174
 ```
 
+- Mot de passe de la démonstration (affiché par `demo:setup`) : `demonstration-agence`. Il est public :
+  il ne protège que des données fictives.
+
 - La démo utilise une **base séparée** (`ai_agency_demo`) et ses **propres ports** : elle peut tourner en
   même temps que l’application réelle. Toute base dont le nom ne finit pas par `_demo` est refusée.
 - Tout est fictif (créateurs, statistiques, adresses en `.example`). Aucun e-mail, aucun doublage et
@@ -105,3 +120,17 @@ CRM : `GET /api/prospects`, `GET /api/prospects/:id/dossier`, `POST /api/prospec
 `POST /api/prospects/:id/email/decisions`, `POST /api/prospects/:id/email/drafts`,
 `POST /api/prospects/:id/email/simulated-send`, `POST /api/prospects/:id/replies`,
 `POST /api/prospects/:id/followups`, `PATCH /api/prospects/:id/followup`, `POST /api/prospects/:id/notes`.
+
+Agents IA (identité et clés API, détail dans [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#7-quater-identité-et-authentification-des-agents)) :
+`GET|POST /api/agents`, `GET|PATCH /api/agents/:id`, `POST /api/agents/:id/keys`,
+`POST /api/agents/:id/keys/:keyId/revoke`, `GET /api/agents/me` (avec `Authorization: Bearer <clé>`).
+API des agents ([détail](docs/ARCHITECTURE.md#7-quinquies-api-des-agents)) : `GET /api/agent/prospects/lookup`,
+`GET /api/agent/prospects/:id/context`, `POST /api/agent/prospects`, `PATCH /api/agent/prospects/:id`,
+`POST /api/agent/prospects/:id/{analyses|productions|stage|events}`, `POST /api/agent/missions/:id/transitions`.
+Chaque route exige une permission accordée par l’utilisateur et, pour les écritures, un en-tête `Idempotency-Key`.
+Un agent ne peut jamais valider, décider ni envoyer un e-mail à la place de l’utilisateur.
+Limites globales par jour, tous agents confondus : 10 nouveaux prospects, 200 enrichissements, 100 productions.
+**Arrêt d’urgence** : bouton « Arrêt d’urgence » en haut de l’interface (immédiat), ou `AGENTS_ENABLED=false`
+dans `.env`. L’utilisateur garde un accès normal.
+Il ne lit que par `/api/agent/…`, et seulement les données de son rôle (coordonnées, analyses, productions,
+échanges…) ; jamais les notes internes ni les motifs des décisions sans autorisation explicite.

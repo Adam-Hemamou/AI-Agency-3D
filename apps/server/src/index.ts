@@ -1,5 +1,10 @@
 import pkg from '../package.json' with { type: 'json' };
+import { createAgentService } from './agents/agentService.ts';
+import { createAgentControl } from './agents/agentControl.ts';
+import { createIdempotencyStore } from './agents/idempotency.ts';
+import { createQuotaService } from './agents/quotas.ts';
 import { createApp } from './app.ts';
+import { createOwnerAuthService } from './auth/ownerAuth.ts';
 import { DEMO_SERVER_PORT, isDemoDataset, resolveDemoDatabaseUrl } from './config/demo.ts';
 import { loadConfig, type AppConfig } from './config/env.ts';
 import { createDatabaseProbe, createPrismaClient } from './db/prisma.ts';
@@ -28,10 +33,25 @@ try {
 
 const prisma = createPrismaClient(config.DATABASE_URL);
 const missions = createMissionService(prisma);
+const owner = createOwnerAuthService({ prisma });
+const agentControl = createAgentControl({ prisma, envEnabled: config.AGENTS_ENABLED });
+try {
+  // L'interrupteur enregistré s'applique avant d'accepter la moindre requête.
+  await agentControl.load();
+} catch (error) {
+  logger.warn('Arrêt d’urgence : état enregistré illisible, agents ARRÊTÉS par précaution', error);
+  await agentControl.setEnabled(false).catch(() => {});
+}
 const app = createApp({
   db: createDatabaseProbe(prisma),
   missions,
   prospects: createProspectService({ prisma, missions, simulationMode: config.MODE_SIMULATION }),
+  agents: createAgentService({ prisma }),
+  idempotency: createIdempotencyStore(prisma),
+  owner,
+  quotas: createQuotaService({ prisma }),
+  agentControl,
+  allowedHosts: config.ALLOWED_HOSTS,
   version: pkg.version,
   simulationMode: config.MODE_SIMULATION,
   demoMode,
@@ -40,6 +60,17 @@ const app = createApp({
 const server = app.listen(config.SERVER_PORT, '127.0.0.1', () => {
   logger.info(`API démarrée sur http://127.0.0.1:${config.SERVER_PORT}`);
   if (demoMode) logger.info('DÉMONSTRATION : base séparée, données fictives uniquement.');
+  void owner.hasPassword().then(
+    (defined) => {
+      if (!defined) {
+        logger.warn('Aucun mot de passe administrateur : lancez « npm run owner:password ».');
+      }
+    },
+    () => logger.warn('Mot de passe administrateur : vérification impossible (base injoignable ?)'),
+  );
+  if (!agentControl.isEnabled()) {
+    logger.warn('ARRÊT D’URGENCE ACTIF : toutes les opérations des agents sont refusées.');
+  }
   if (config.MODE_SIMULATION) {
     logger.info('Mode simulation ACTIF : aucune action externe réelle ne sera effectuée.');
   } else {

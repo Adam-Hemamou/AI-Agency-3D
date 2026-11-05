@@ -27,7 +27,9 @@
     "db:logs": "docker compose logs -f mysql",
     "db:generate": "npm run db:generate -w @agency/server",
     "db:migrate": "npm run db:migrate -w @agency/server",
-    "db:studio": "npm run db:studio -w @agency/server"
+    "db:studio": "npm run db:studio -w @agency/server",
+    "owner:password": "npm run owner:password -w @agency/server --",
+    "db:check-duplicates": "npm run db:check-duplicates -w @agency/server --"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

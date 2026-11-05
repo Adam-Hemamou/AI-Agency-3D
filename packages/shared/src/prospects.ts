@@ -259,6 +259,10 @@ export const PROSPECT_EVENT_TYPES = [
   'followup_updated',
   'note_added',
   'mission_linked',
+  /** Informations du prospect complétées (par un agent). */
+  'prospect_enriched',
+  /** Activité signalée par un agent (recherche effectuée, étape de travail…). */
+  'agent_activity',
 ] as const;
 export type ProspectEventType = (typeof PROSPECT_EVENT_TYPES)[number];
 

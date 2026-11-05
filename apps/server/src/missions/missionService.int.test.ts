@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   createMissionRequestSchema,
+  isAgentMissionAction,
   missionListQuerySchema,
   type CreateMissionRequest,
   type MissionTransitionRequest,
@@ -26,7 +27,12 @@ async function create(overrides: Partial<CreateMissionRequest> = {}, actor: Acto
   return (await service.create(input, actor)).mission;
 }
 
-function act(id: string, request: MissionTransitionRequest, actor: Actor = agent) {
+/** Par défaut, l'agent agit ; annuler et débloquer lui étant interdits, l'utilisateur s'en charge. */
+function act(
+  id: string,
+  request: MissionTransitionRequest,
+  actor: Actor = isAgentMissionAction(request.action) ? agent : user,
+) {
   return service.applyAction(id, request, actor);
 }
 
@@ -312,6 +318,39 @@ describe('validation humaine obligatoire', () => {
     await expectAppError(service.decide(id, { decision: 'approve' }, agent), 'FORBIDDEN_ACTOR');
     await expectAppError(service.decide(id, { decision: 'approve' }, system), 'FORBIDDEN_ACTOR');
     expect((await service.get(id)).status).toBe('awaiting_validation');
+  });
+
+  it('interdit à un agent d’annuler ou de débloquer une mission', async () => {
+    const { id } = await create();
+    await expectAppError(
+      service.applyAction(id, { action: 'cancel', reason: 'Fin' }, agent),
+      'FORBIDDEN_ACTOR',
+    );
+    await act(id, { action: 'block', reason: 'Données manquantes' });
+    await expectAppError(service.applyAction(id, { action: 'unblock' }, agent), 'FORBIDDEN_ACTOR');
+    expect((await service.get(id)).status).toBe('blocked');
+    await service.applyAction(id, { action: 'unblock' }, user);
+    expect((await service.get(id)).status).toBe('pending');
+  });
+
+  it('refuse un agent qui se présente comme « utilisateur », pour chaque décision', async () => {
+    const id = await awaitingValidation();
+    const impostors: Actor[] = [
+      { type: 'user', id: 'agent-analyste' },
+      { type: 'user', id: null },
+      { type: 'user', id: '' },
+    ];
+    for (const actor of impostors) {
+      for (const decision of ['approve', 'reject', 'request_changes'] as const) {
+        await expectAppError(
+          service.decide(id, { decision, reason: 'Tentative' }, actor),
+          'FORBIDDEN_ACTOR',
+        );
+      }
+    }
+    expect((await service.get(id)).status).toBe('awaiting_validation');
+    // Aucune tentative refusée n'apparaît dans l'historique.
+    expect((await service.events(id)).map((e) => e.action)).not.toContain('approve');
   });
 
   it('refuse une décision si la mission n’attend pas de validation', async () => {

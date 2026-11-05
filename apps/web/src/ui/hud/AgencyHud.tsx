@@ -1,12 +1,15 @@
 import { ROOM_IDS } from '@agency/shared';
+import { useLogout } from '../../api/auth';
 import { useHealth } from '../../api/health';
 import { SPACE_DESIGNS } from '../../scene/rooms/roomDesigns';
 import { useAgencyStore } from '../../stores/agencyStore';
+import { AgentsSwitch } from '../components/AgentsSwitch';
 import { HealthStatus } from '../components/HealthStatus';
 
 /** Éléments fixes par-dessus la scène : titre, état du système, plan des salles, aide. */
 export function AgencyHud() {
   const health = useHealth();
+  const logout = useLogout();
   const hoveredRoom = useAgencyStore((s) => s.hoveredRoom);
   const selectedRoom = useAgencyStore((s) => s.selectedRoom);
   const selectRoom = useAgencyStore((s) => s.selectRoom);
@@ -38,6 +41,15 @@ export function AgencyHud() {
           </summary>
           <HealthStatus health={health.data} isLoading={health.isLoading} error={health.error} />
         </details>
+        <AgentsSwitch />
+        <button
+          type="button"
+          className="hud-logout"
+          onClick={() => logout.mutate()}
+          disabled={logout.isPending}
+        >
+          Se déconnecter
+        </button>
       </header>
 
       <nav className="hud-card hud-rooms" aria-label="Salles de l'agence">

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { ProductionOf, ProspectDossier } from '@agency/shared';
 import { useDossierActions } from '../actions';
 import { actorLabel, formatDateTime } from '../format';
-import { Card, EmptyState, Missing, ProductionBadge } from '../primitives';
+import { Card, EmptyState, ExternalLink, Missing, ProductionBadge } from '../primitives';
 import { DecisionHistory } from './Decision';
 
 type Email = ProductionOf<'email'>;
@@ -103,8 +103,7 @@ function EmailView({ email }: { email: Email }) {
       <div className="d-mail__body">{c.body}</div>
       {c.demoUrl && (
         <p className="d-mail__demo">
-          🎬 Lien vers la démonstration :{' '}
-          <a href={c.demoUrl}>{c.demoUrl.replace(/^https?:\/\//, '')}</a>
+          🎬 Lien vers la démonstration : <ExternalLink url={c.demoUrl} newTab={false} />
         </p>
       )}
     </article>

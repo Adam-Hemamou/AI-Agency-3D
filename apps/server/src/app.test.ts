@@ -2,7 +2,8 @@ import request from 'supertest';
 import express from 'express';
 import { describe, expect, it } from 'vitest';
 import { healthResponseSchema } from '@agency/shared';
-import { createApp } from './app.ts';
+import { createApp, type AppDeps } from './app.ts';
+import type { OwnerAuthService } from './auth/ownerAuth.ts';
 import type { DatabaseProbe } from './db/prisma.ts';
 import { AppError } from './errors/AppError.ts';
 import { errorHandler } from './errors/errorHandler.ts';
@@ -18,8 +19,23 @@ const downDb: DatabaseProbe = {
   },
 };
 
-function makeApp(db: DatabaseProbe) {
-  return createApp({ db, missions: unusedMissions, version: '0.1.0', simulationMode: true });
+const SESSION = 'S'.repeat(43);
+const SESSION_COOKIE = `agency_session=${SESSION}`;
+/** Une seule session reconnue : SESSION. */
+const fakeOwner = {
+  authenticate: async (token: string) =>
+    token === SESSION ? { id: 'session-1', expiresAt: new Date('2026-11-06T00:00:00Z') } : null,
+} as unknown as OwnerAuthService;
+
+function makeApp(db: DatabaseProbe, extra: Partial<AppDeps> = {}) {
+  return createApp({
+    db,
+    missions: unusedMissions,
+    version: '0.1.0',
+    simulationMode: true,
+    owner: fakeOwner,
+    ...extra,
+  });
 }
 
 describe('GET /api/health', () => {
@@ -48,8 +64,14 @@ describe('GET /api/health', () => {
 });
 
 describe('gestion des erreurs', () => {
-  it('renvoie une 404 au format standard pour une route inconnue', async () => {
+  it('ne révèle rien à une requête sans identité, même pour une route inconnue (401)', async () => {
     const res = await request(makeApp(upDb)).get('/api/inexistant');
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe('UNAUTHENTICATED');
+  });
+
+  it('renvoie une 404 au format standard pour une route inconnue (connecté)', async () => {
+    const res = await request(makeApp(upDb)).get('/api/inexistant').set('Cookie', SESSION_COOKIE);
     expect(res.status).toBe(404);
     expect(res.body).toEqual({
       error: { code: 'NOT_FOUND', message: 'Route introuvable : GET /api/inexistant' },
@@ -110,5 +132,59 @@ describe('gestion des erreurs', () => {
     } finally {
       console.error = original;
     }
+  });
+});
+
+describe('protection contre les requêtes venues d’ailleurs', () => {
+  it.each(['evil.example', 'evil.example:3001', '127.0.0.1.evil.example', ''])(
+    'refuse l’adresse %j (DNS rebinding)',
+    async (host) => {
+      const res = await request(makeApp(upDb)).get('/api/health').set('Host', host);
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe('FORBIDDEN_ORIGIN');
+    },
+  );
+
+  it.each(['localhost:5173', '127.0.0.1:3001', 'LOCALHOST'])('accepte %j', async (host) => {
+    const res = await request(makeApp(upDb)).get('/api/health').set('Host', host);
+    expect(res.status).toBe(200);
+  });
+
+  it('accepte un nom d’hôte ajouté explicitement (n8n plus tard)', async () => {
+    const app = makeApp(upDb, { allowedHosts: ['host.docker.internal'] });
+    const res = await request(app).get('/api/health').set('Host', 'host.docker.internal:3001');
+    expect(res.status).toBe(200);
+  });
+
+  const write = (origin: string | null) => {
+    const req = request(makeApp(upDb))
+      .post('/api/inexistant')
+      .set('Host', 'localhost:5173')
+      .set('Cookie', SESSION_COOKIE);
+    return origin === null ? req : req.set('Origin', origin);
+  };
+
+  it.each([
+    ['sans Origin', null],
+    ['autre site', 'http://evil.example'],
+    ['autre application locale (autre port)', 'http://localhost:8080'],
+    ['autre schéma', 'https://localhost:5173'],
+  ])('refuse une écriture avec la session : %s', async (_label, origin) => {
+    const res = await write(origin);
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('FORBIDDEN_ORIGIN');
+  });
+
+  it('accepte une écriture venant de l’interface (même origine)', async () => {
+    const res = await write('http://localhost:5173');
+    expect(res.status).toBe(404); // passée les contrôles : route inexistante
+  });
+
+  it('les lectures avec la session ne demandent pas d’Origin', async () => {
+    const res = await request(makeApp(upDb))
+      .get('/api/inexistant')
+      .set('Host', 'localhost:5173')
+      .set('Cookie', SESSION_COOKIE);
+    expect(res.status).toBe(404);
   });
 });

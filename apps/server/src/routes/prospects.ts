@@ -11,14 +11,12 @@ import {
   simulatedSendRequestSchema,
 } from '@agency/shared';
 import { parseOrThrow } from '../lib/validate.ts';
-import type { Actor } from '../missions/missionService.ts';
+import { actorOf } from '../auth/requestActor.ts';
 import type { ProspectService } from '../prospects/prospectService.ts';
 
-/** Les requêtes HTTP proviennent de l'interface, donc de l'utilisateur humain. */
-const HTTP_ACTOR: Actor = { type: 'user', id: 'owner' };
-
 /**
- * Routes du CRM. Lecture du dossier complet et actions humaines uniquement :
+ * Routes du CRM. Lecture du dossier complet et actions humaines uniquement
+ * (agentAccessGuard refuse aux agents toutes les écritures ; l'auteur vient d'identifyRequest) :
  * chaque action passe par le service des prospects, qui applique les règles métier
  * et fait évoluer les missions via le moteur de missions.
  */
@@ -36,42 +34,42 @@ export function prospectsRouter(prospects: ProspectService): Router {
 
   router.post('/:id/decisions', async (req, res) => {
     const body = parseOrThrow(prospectDecisionRequestSchema, req.body, 'Décision');
-    res.json(await prospects.decideProspect(req.params.id, body, HTTP_ACTOR));
+    res.json(await prospects.decideProspect(req.params.id, body, actorOf(res)));
   });
 
   router.post('/:id/email/decisions', async (req, res) => {
     const body = parseOrThrow(emailDecisionRequestSchema, req.body, 'Décision sur l’e-mail');
-    res.json(await prospects.decideEmail(req.params.id, body, HTTP_ACTOR));
+    res.json(await prospects.decideEmail(req.params.id, body, actorOf(res)));
   });
 
   router.post('/:id/email/drafts', async (req, res) => {
     const body = parseOrThrow(emailDraftRequestSchema, req.body, 'Brouillon');
-    res.json(await prospects.editEmailDraft(req.params.id, body, HTTP_ACTOR));
+    res.json(await prospects.editEmailDraft(req.params.id, body, actorOf(res)));
   });
 
   router.post('/:id/email/simulated-send', async (req, res) => {
     const body = parseOrThrow(simulatedSendRequestSchema, req.body, 'Envoi simulé');
-    res.json(await prospects.simulateSend(req.params.id, body, HTTP_ACTOR));
+    res.json(await prospects.simulateSend(req.params.id, body, actorOf(res)));
   });
 
   router.post('/:id/replies', async (req, res) => {
     const body = parseOrThrow(replyRequestSchema, req.body, 'Réponse');
-    res.json(await prospects.recordReply(req.params.id, body, HTTP_ACTOR));
+    res.json(await prospects.recordReply(req.params.id, body, actorOf(res)));
   });
 
   router.post('/:id/followups', async (req, res) => {
     const body = parseOrThrow(followupMessageRequestSchema, req.body, 'Relance');
-    res.json(await prospects.sendFollowup(req.params.id, body, HTTP_ACTOR));
+    res.json(await prospects.sendFollowup(req.params.id, body, actorOf(res)));
   });
 
   router.patch('/:id/followup', async (req, res) => {
     const body = parseOrThrow(followupUpdateRequestSchema, req.body, 'Suivi');
-    res.json(await prospects.updateFollowup(req.params.id, body, HTTP_ACTOR));
+    res.json(await prospects.updateFollowup(req.params.id, body, actorOf(res)));
   });
 
   router.post('/:id/notes', async (req, res) => {
     const body = parseOrThrow(noteRequestSchema, req.body, 'Note');
-    res.json(await prospects.addNote(req.params.id, body, HTTP_ACTOR));
+    res.json(await prospects.addNote(req.params.id, body, actorOf(res)));
   });
 
   return router;

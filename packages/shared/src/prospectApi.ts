@@ -28,6 +28,21 @@ const longText = z.string().trim().min(1).max(20_000);
 const versionSchema = z.number().int().nonnegative();
 const idSchema = z.string().min(1).max(36);
 
+/**
+ * Adresse web affichable : http ou https uniquement. Refuse « javascript: », « data: »… qui,
+ * transformées en lien dans l'interface, pourraient agir au nom de l'utilisateur.
+ */
+export function isSafeHttpUrl(value: string): boolean {
+  return /^https?:\/\/[^\s/?#]+[^\s]*$/i.test(value.trim());
+}
+export const httpUrlSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(500)
+  .refine(isSafeHttpUrl, { error: 'Adresse web invalide : http:// ou https:// attendu' });
+const optionalUrl = httpUrlSchema.nullable().default(null);
+
 // ---------------------------------------------------------------------------
 // Contenus structurés
 // ---------------------------------------------------------------------------
@@ -58,7 +73,7 @@ export type Discovery = z.infer<typeof discoverySchema>;
 
 export const videoRefSchema = z.object({
   title: text,
-  url: z.string().nullable().default(null),
+  url: optionalUrl,
   publishedAt: isoDate,
   views: z.number().int().nonnegative().nullable().default(null),
   durationSeconds: z.number().int().positive().nullable().default(null),
@@ -78,7 +93,7 @@ export type ScoreCriterion = z.infer<typeof scoreCriterionSchema>;
 
 export const sourceRefSchema = z.object({
   label: text,
-  url: z.string().nullable().default(null),
+  url: optionalUrl,
 });
 
 export const analysisContentSchema = z.object({
@@ -110,7 +125,7 @@ export const analysisContentSchema = z.object({
 export type AnalysisContent = z.infer<typeof analysisContentSchema>;
 
 export const videoExcerptContentSchema = z.object({
-  videoUrl: z.string().nullable().default(null),
+  videoUrl: optionalUrl,
   title: text,
   publishedAt: isoDate.nullable().default(null),
   durationSeconds: z.number().int().positive().nullable().default(null),
@@ -134,7 +149,7 @@ export const dubbingContentSchema = z.object({
   settings: z.record(z.string(), z.string()).default({}),
   generationStatus: z.enum(['not_started', 'simulated', 'failed', 'generated']),
   generatedAt: isoDate.nullable().default(null),
-  resultUrl: z.string().nullable().default(null),
+  resultUrl: optionalUrl,
   notes: z.string().nullable().default(null),
   attempts: z.array(dubbingAttemptSchema).default([]),
 });
@@ -149,7 +164,7 @@ export const proposalContentSchema = z.object({
   recommendations: z.array(text).default([]),
   serviceType: text,
   offerDescription: text,
-  demoUrl: z.string().nullable().default(null),
+  demoUrl: optionalUrl,
 });
 
 export const emailContentSchema = z.object({
@@ -157,7 +172,7 @@ export const emailContentSchema = z.object({
   recipientName: z.string().nullable().default(null),
   subject: z.string().trim().min(1).max(250),
   body: longText,
-  demoUrl: z.string().nullable().default(null),
+  demoUrl: optionalUrl,
 });
 export type EmailContent = z.infer<typeof emailContentSchema>;
 
@@ -414,8 +429,8 @@ export const createProspectRequestSchema = z.strictObject({
   channelName: z.string().trim().min(1).max(160),
   channelHandle: optionalText(120),
   youtubeChannelId: optionalText(64),
-  channelUrl: optionalText(500),
-  avatarUrl: optionalText(500),
+  channelUrl: optionalUrl,
+  avatarUrl: optionalUrl,
   category: optionalText(80),
   description: optionalText(5000),
   country: optionalText(80),

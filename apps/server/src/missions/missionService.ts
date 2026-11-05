@@ -1,8 +1,8 @@
 import {
   ERROR_CODES,
-  VALIDATION_ACTOR,
   VALIDATION_TRANSITIONS,
   checkMissionAction,
+  isAgentMissionAction,
   checkValidationDecision,
   getAvailableActions,
   getAvailableDecisions,
@@ -21,6 +21,8 @@ import {
 } from '@agency/shared';
 import { Prisma, type Mission as MissionRow } from '../generated/prisma/client.ts';
 import type { AppPrismaClient } from '../db/prisma.ts';
+import type { TransactionHook } from '../db/transactionHook.ts';
+import { assertHumanActor } from '../auth/actors.ts';
 import { AppError } from '../errors/AppError.ts';
 import {
   PROSPECT_SUMMARY_SELECT,
@@ -126,6 +128,9 @@ function concurrentModification(id: string): AppError {
     409,
   );
 }
+
+/** Action réservée à l'humain (message d'erreur FORBIDDEN_ACTOR). */
+const VALIDATION_DECISION = 'rendre une décision de validation';
 
 function missionNotFound(id: string): AppError {
   return AppError.notFound(`Mission introuvable : ${id}`);
@@ -252,6 +257,14 @@ export function createMissionService(
 
   /** Action de cycle de vie : démarrer, mettre en pause, bloquer, terminer… */
   function applyActionIn(tx: Db, id: string, request: MissionTransitionRequest, actor: Actor) {
+    // Annuler ou débloquer une mission reste une décision humaine (ou du système).
+    if (actor.type === 'agent' && !isAgentMissionAction(request.action)) {
+      throw new AppError(
+        ERROR_CODES.FORBIDDEN_ACTOR,
+        `Un agent ne peut pas effectuer l'action « ${request.action} » sur une mission`,
+        403,
+      );
+    }
     return mutateIn(tx, id, request.expectedVersion, actor, (current, now) => {
       const check = checkMissionAction(toState(current), request.action);
       if (!check.allowed) throw refusal(check, current, request.action);
@@ -292,17 +305,10 @@ export function createMissionService(
     });
   }
 
-  function forbiddenValidator(): AppError {
-    return new AppError(
-      ERROR_CODES.FORBIDDEN_ACTOR,
-      'Seul un utilisateur humain peut rendre une décision de validation',
-      403,
-    );
-  }
-
   /** Décision humaine sur un résultat soumis à validation. */
   function decideIn(tx: Db, id: string, request: ValidationDecisionRequest, actor: Actor) {
-    if (actor.type !== VALIDATION_ACTOR) throw forbiddenValidator();
+    // Un agent ou le système ne peut jamais valider, refuser ni faire corriger un résultat.
+    assertHumanActor(actor, VALIDATION_DECISION);
     return mutateIn(tx, id, request.expectedVersion, actor, (current, now) => {
       const check = checkValidationDecision(toState(current), request.decision);
       if (!check.allowed) throw refusal(check, current, request.decision);
@@ -379,12 +385,29 @@ export function createMissionService(
       return rows.map(toMissionEventDto);
     },
 
-    async applyAction(id: string, request: MissionTransitionRequest, actor: Actor) {
-      return prisma.$transaction((tx) => applyActionIn(tx, id, request, actor));
+    async applyAction(
+      id: string,
+      request: MissionTransitionRequest,
+      actor: Actor,
+      options: { hook?: TransactionHook } = {},
+    ) {
+      return prisma.$transaction(async (tx) => {
+        await options.hook?.begin(tx);
+        const result = await applyActionIn(tx, id, request, actor);
+        await options.hook?.end(tx, { type: 'mission', id, eventId: result.event.id });
+        return result;
+      });
+    },
+
+    /** Un événement de l'historique d'une mission (réponse rejouée d'une requête d'agent). */
+    async event(missionId: string, eventId: number): Promise<MissionEvent> {
+      const row = await prisma.missionEvent.findFirst({ where: { id: eventId, missionId } });
+      if (!row) throw AppError.notFound(`Événement introuvable : ${eventId}`);
+      return toMissionEventDto(row);
     },
 
     async decide(id: string, request: ValidationDecisionRequest, actor: Actor) {
-      if (actor.type !== VALIDATION_ACTOR) throw forbiddenValidator();
+      assertHumanActor(actor, VALIDATION_DECISION);
       return prisma.$transaction((tx) => decideIn(tx, id, request, actor));
     },
   };

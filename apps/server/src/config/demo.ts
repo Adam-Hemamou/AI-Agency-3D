@@ -6,6 +6,12 @@
  * d'écrire des données fictives dans la base réelle par erreur.
  */
 
+/**
+ * Mot de passe de la démonstration (données fictives uniquement, base séparée).
+ * Il est public par nature : ne jamais l'utiliser pour la base réelle.
+ */
+export const DEMO_OWNER_PASSWORD = 'demonstration-agence';
+
 /** Ports dédiés : la démo peut tourner en même temps que l'application réelle. */
 export const DEMO_SERVER_PORT = 3101;
 
