@@ -38,6 +38,8 @@ export async function resetDatabase(): Promise<void> {
       'prospect_analyses',
       'prospects',
       'prospect_counters',
+      'agent_quota_usage',
+      'agent_switch',
       'owner_sessions',
       'owner_credentials',
       'agent_requests',

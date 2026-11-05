@@ -30,6 +30,10 @@ export const ERROR_CODES = {
   FORBIDDEN_ORIGIN: 'FORBIDDEN_ORIGIN',
   /** Aucun mot de passe administrateur défini : lancer « npm run owner:password ». */
   OWNER_PASSWORD_NOT_SET: 'OWNER_PASSWORD_NOT_SET',
+  /** Quota journalier des agents atteint (global, tous agents confondus) : réessayer le lendemain. */
+  QUOTA_EXCEEDED: 'QUOTA_EXCEEDED',
+  /** Arrêt d'urgence : les agents sont désactivés (AGENTS_ENABLED=false ou interrupteur de l'interface). */
+  AGENTS_DISABLED: 'AGENTS_DISABLED',
   /** Contact interdit : le prospect a refusé ou demandé à ne plus être contacté. */
   CONTACT_NOT_ALLOWED: 'CONTACT_NOT_ALLOWED',
   INTERNAL_ERROR: 'INTERNAL_ERROR',

@@ -14,6 +14,11 @@ export const envSchema = z.object({
   /** Garde-fou : actif par défaut. Doit être explicitement mis à "false" pour autoriser le réel. */
   MODE_SIMULATION: booleanFlag.default(true),
   /**
+   * Arrêt d'urgence des agents : "false" bloque toutes leurs opérations dès le démarrage, sans que
+   * l'interface puisse le lever. L'utilisateur garde un accès normal au CRM.
+   */
+  AGENTS_ENABLED: booleanFlag.default(true),
+  /**
    * Noms d'hôte acceptés en plus de localhost / 127.0.0.1, séparés par des virgules
    * (ex. « host.docker.internal » quand n8n sera branché). Vide par défaut.
    */

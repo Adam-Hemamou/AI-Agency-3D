@@ -23,6 +23,15 @@ export const errorHandler: ErrorRequestHandler = (err: unknown, req, res, _next)
     return;
   }
 
+  // Corps trop volumineux (limite plus basse pour les agents).
+  if ((err as { type?: unknown }).type === 'entity.too.large') {
+    const body: ApiErrorBody = {
+      error: { code: ERROR_CODES.VALIDATION_ERROR, message: 'Corps de requête trop volumineux' },
+    };
+    res.status(413).json(body);
+    return;
+  }
+
   // JSON mal formé envoyé par le client.
   if (err instanceof SyntaxError && 'body' in err) {
     const body: ApiErrorBody = {

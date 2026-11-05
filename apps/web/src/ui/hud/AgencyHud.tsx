@@ -3,6 +3,7 @@ import { useLogout } from '../../api/auth';
 import { useHealth } from '../../api/health';
 import { SPACE_DESIGNS } from '../../scene/rooms/roomDesigns';
 import { useAgencyStore } from '../../stores/agencyStore';
+import { AgentsSwitch } from '../components/AgentsSwitch';
 import { HealthStatus } from '../components/HealthStatus';
 
 /** Éléments fixes par-dessus la scène : titre, état du système, plan des salles, aide. */
@@ -40,6 +41,7 @@ export function AgencyHud() {
           </summary>
           <HealthStatus health={health.data} isLoading={health.isLoading} error={health.error} />
         </details>
+        <AgentsSwitch />
         <button
           type="button"
           className="hud-logout"
