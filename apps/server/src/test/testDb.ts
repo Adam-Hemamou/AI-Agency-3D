@@ -37,6 +37,8 @@ export async function resetDatabase(): Promise<void> {
       'prospect_productions',
       'prospect_analyses',
       'prospects',
+      'agent_api_keys',
+      'agents',
     ]) {
       await connection.query(`TRUNCATE TABLE \`${table}\``);
     }
