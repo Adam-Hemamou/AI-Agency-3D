@@ -564,7 +564,8 @@ brancher les vrais statuts ne demandera aucune réécriture des animations.
 
 - `MODE_SIMULATION=true` par défaut. Seule la valeur exacte `false` le désactive ; toute autre valeur fait échouer le démarrage.
 - Tout fournisseur réel devra lever `AppError.externalActionBlocked()` tant que le mode simulation est actif.
-- L'API et MySQL n'écoutent que sur `127.0.0.1` (pas d'accès depuis le réseau).
+- L'API et MySQL n'écoutent que sur `127.0.0.1` (pas d'accès depuis le réseau). Exception facultative : une
+  deuxième écoute de l'API sur l'adresse Tailscale, réservée au VPS et aux routes des agents ([§ 9 ter](#9-ter-accès-du-vps-via-tailscale)).
 - **Refus par défaut** : toute requête qui n'est ni celle d'une session humaine valide, ni celle d'un agent muni
   de sa clé, reçoit 401. Seuls `GET /api/health`, `GET /api/auth/session` et `POST /api/auth/login` sont publics.
   Voir [§ 9 bis](#9-bis-authentification-de-lutilisateur).
@@ -598,6 +599,40 @@ Lot A du renforcement de la sécurité (`apps/server/src/auth/`, migration `2026
 | `GET /api/auth/session` | État de la session (public)                        |
 | `POST /api/auth/login`  | Connexion (`password`) ; pose le cookie de session |
 | `POST /api/auth/logout` | Ferme la session                                   |
+
+## 9 ter. Accès du VPS via Tailscale
+
+n8n tourne sur un VPS ; il joint l'API du PC par **Tailscale** (réseau privé chiffré), jamais par Internet.
+Code : `apps/server/src/network/tailnet.ts` (écoute filtrée) et `network/shutdown.ts` (arrêt propre).
+
+- **Deux écoutes** : `127.0.0.1` (inchangée, toutes les routes, pour l'interface) et, si configurée, une **deuxième
+  écoute sur l'adresse Tailscale du PC**. Jamais `0.0.0.0` ni `::` : refusés au démarrage.
+- **Configuration** (`.env`, lue au démarrage uniquement) : `TAILSCALE_BIND_ADDRESS` (adresse Tailscale du PC) et
+  `TAILSCALE_ALLOWED_PEER` (adresse Tailscale du VPS), renseignées ensemble ou pas du tout ; l'adresse d'écoute doit
+  figurer dans `ALLOWED_HOSTS`. Adresses IPv4 de la plage Tailscale (`100.64.0.0/10`) en écriture décimale stricte
+  (`net.isIPv4`) : zéros en tête, hexadécimal, formes abrégées ou adresses hors plage sont refusés. Ignorées en
+  démonstration (toujours locale).
+- **Filtre 1, à la connexion TCP**, avant toute lecture HTTP : une connexion qui ne vient pas exactement du VPS est
+  coupée sans réponse (et journalisée).
+- **Filtre 2, à la requête** : seules `/api/health`, `/api/agent/…` et `GET /api/agents/me` (chemin exact) atteignent
+  l'application ; toute autre route reçoit 403 (connexion de l'interface, administration des agents, routes du CRM).
+  Comparaison stricte du chemin : `..`, `//`, encodages, antislash et URL absolues sont refusés.
+- **Protections inchangées** ensuite : contrôle `Host`, clé d'agent obligatoire (`Authorization: Bearer`), liste
+  blanche et permissions, débit, quotas, arrêt d'urgence.
+- **Tailscale arrêté ou adresse indisponible** au démarrage : seule l'écoute locale démarre (erreur journalisée) ;
+  redémarrer l'API une fois Tailscale connecté.
+- **Arrêt propre** : les deux écoutes se ferment ; les requêtes en cours ont 5 s pour finir, puis les connexions sont
+  coupées ; un second Ctrl+C quitte immédiatement.
+- **Pare-feu Windows** : à compléter par une règle n'autorisant que le VPS sur le port de l'API, côté adresse
+  Tailscale (non créée par le projet).
+
+Exemple (adresses fictives) :
+
+```
+ALLOWED_HOSTS=100.90.1.10
+TAILSCALE_BIND_ADDRESS=100.90.1.10
+TAILSCALE_ALLOWED_PEER=100.90.2.20
+```
 
 ## 10. Gestion des erreurs
 
@@ -751,3 +786,4 @@ Chaque phase est validée avant de passer à la suivante.
 | 06/11/2026 | Les consignes destinées aux agents (nouvelle analyse, modification d’un e-mail) sont transmises seules, sans le reste de la décision humaine.                                                                                                                |
 | 06/11/2026 | **Lot E** : quotas journaliers globaux (10 / 200 / 100) comptés dans la transaction de l’écriture, sur une ligne verrouillée ; un refus annule tout.                                                                                                         |
 | 06/11/2026 | Arrêt d’urgence à deux commandes cumulées : `AGENTS_ENABLED` (.env, non levable depuis l’interface) et interrupteur de l’interface conservé en base. Vérifié à l’entrée de la requête et dans chaque transaction d’écriture.                                 |
+| 06/11/2026 | **Accès du VPS par Tailscale** : deuxième écoute sur l'adresse Tailscale du PC, filtrée à la connexion (VPS seul) puis par route (routes des agents seulement), en plus de 127.0.0.1 inchangée. Jamais 0.0.0.0.                                              |
