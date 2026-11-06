@@ -17,8 +17,17 @@ export const MISSION_ACTIONS = [
   'block',
   'unblock',
   'cancel',
+  /**
+   * Remise en attente après l'échec d'une exécution (Phase 2) : RÉSERVÉE AU SYSTÈME, et refusée
+   * par le moteur si la mission a déjà produit un effet depuis son démarrage ou s'il ne reste
+   * aucune tentative. Jamais proposée dans l'interface (SYSTEM_MISSION_ACTIONS).
+   */
+  'release',
 ] as const;
 export type MissionAction = (typeof MISSION_ACTIONS)[number];
+
+/** Actions que seul le système peut effectuer : jamais proposées comme « disponibles ». */
+export const SYSTEM_MISSION_ACTIONS: readonly MissionAction[] = ['release'];
 
 export const MISSION_ACTION_LABELS: Record<MissionAction, string> = {
   start: 'Démarrer',
@@ -29,6 +38,7 @@ export const MISSION_ACTION_LABELS: Record<MissionAction, string> = {
   block: 'Bloquer',
   unblock: 'Débloquer',
   cancel: 'Annuler',
+  release: 'Remettre en attente',
 };
 
 interface Transition {
@@ -44,6 +54,7 @@ export const MISSION_TRANSITIONS: Record<MissionAction, Transition> = {
   complete: { from: ['in_progress'], to: 'completed' },
   block: { from: ['pending', 'in_progress'], to: 'blocked' },
   unblock: { from: ['blocked'], to: 'pending' },
+  release: { from: ['in_progress'], to: 'pending' },
   cancel: {
     from: ['pending', 'in_progress', 'awaiting_validation', 'paused', 'blocked'],
     to: 'cancelled',
@@ -77,7 +88,7 @@ export const VALIDATION_TRANSITIONS: Record<
 export const VALIDATION_ACTOR: ActorType = 'user';
 
 /** Actions et décisions pour lesquelles un motif écrit est obligatoire (traçabilité). */
-export const ACTIONS_REQUIRING_REASON: readonly MissionAction[] = ['block', 'cancel'];
+export const ACTIONS_REQUIRING_REASON: readonly MissionAction[] = ['block', 'cancel', 'release'];
 export const DECISIONS_REQUIRING_REASON: readonly ValidationDecision[] = [
   'request_changes',
   'reject',
@@ -152,6 +163,15 @@ export function checkMissionAction(
     };
   }
 
+  // Remettre en attente une mission qui ne pourrait plus redémarrer n'aurait pas de sens.
+  if (action === 'release' && state.attemptCount >= state.maxAttempts) {
+    return {
+      allowed: false,
+      code: ERROR_CODES.MAX_ATTEMPTS_REACHED,
+      message: `Plus aucune tentative possible (${state.maxAttempts}) : la mission doit être bloquée`,
+    };
+  }
+
   return { allowed: true, to: transition.to };
 }
 
@@ -165,9 +185,15 @@ export function checkValidationDecision(
   return { allowed: true, to: transition.to };
 }
 
-/** Actions de cycle de vie actuellement possibles (pour l'affichage des boutons). */
+/**
+ * Actions de cycle de vie actuellement possibles (pour l'affichage des boutons). Les actions
+ * réservées au système (SYSTEM_MISSION_ACTIONS) n'y figurent jamais.
+ */
 export function getAvailableActions(state: MissionLifecycleState): MissionAction[] {
-  return MISSION_ACTIONS.filter((action) => checkMissionAction(state, action).allowed);
+  return MISSION_ACTIONS.filter(
+    (action) =>
+      !SYSTEM_MISSION_ACTIONS.includes(action) && checkMissionAction(state, action).allowed,
+  );
 }
 
 /** Décisions de validation actuellement possibles. */

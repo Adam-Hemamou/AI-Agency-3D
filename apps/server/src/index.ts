@@ -2,6 +2,7 @@ import type { Server } from 'node:http';
 import pkg from '../package.json' with { type: 'json' };
 import { createAgentProfileService } from './agents/agentProfileService.ts';
 import { createAgentService } from './agents/agentService.ts';
+import { createRunService } from './agents/runService.ts';
 import { createAgentControl } from './agents/agentControl.ts';
 import { createIdempotencyStore } from './agents/idempotency.ts';
 import { createQuotaService } from './agents/quotas.ts';
@@ -56,6 +57,7 @@ const app = createApp({
   prospects: createProspectService({ prisma, missions, simulationMode: config.MODE_SIMULATION }),
   agents: createAgentService({ prisma }),
   profiles: createAgentProfileService({ prisma }),
+  runs: createRunService({ prisma, missions, control: agentControl }),
   idempotency: createIdempotencyStore(prisma),
   owner,
   quotas: createQuotaService({ prisma }),
@@ -126,10 +128,19 @@ if (config.TAILSCALE_BIND_ADDRESS) {
 const staleRecovery = demoMode
   ? null
   : startStaleRecovery({
-      recover: () => missions.recoverStale({ staleAfterMs: config.MISSION_STALE_MINUTES * 60_000 }),
+      recover: async () => {
+        // Exécutions incohérentes (actives, mission plus en cours) : closes avant tout.
+        for (const orphan of await missions.closeOrphanRuns()) {
+          logger.warn(
+            `Exécution ${orphan.runId} close (abandoned) : encore active alors que la mission ${orphan.missionId} est « ${orphan.missionStatus} ».`,
+          );
+        }
+        return missions.recoverStale({ staleAfterMs: config.MISSION_STALE_MINUTES * 60_000 });
+      },
       onRecovered: (m) =>
         logger.warn(
           `Mission ${m.missionId} bloquée : traitement interrompu (agent ${m.agentId ?? 'aucun'}, ` +
+            `${m.runId ? `exécution ${m.runId} abandonnée, ` : ''}` +
             `${hasEffects(m.effects) ? 'effets déjà enregistrés, à vérifier' : 'aucun effet'}).`,
         ),
       onError: (error) => logger.error('Récupération des missions interrompues : échec', error),

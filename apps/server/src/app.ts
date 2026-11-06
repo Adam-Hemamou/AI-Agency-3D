@@ -19,11 +19,13 @@ import { errorHandler, notFoundHandler } from './errors/errorHandler.ts';
 import type { MissionService } from './missions/missionService.ts';
 import type { ProspectService } from './prospects/prospectService.ts';
 import type { AgentProfileService } from './agents/agentProfileService.ts';
+import type { RunService } from './agents/runService.ts';
 import { agentApiRouter } from './routes/agentApi.ts';
 import { agentsRouter } from './routes/agents.ts';
 import { authRouter } from './routes/auth.ts';
 import { healthRouter } from './routes/health.ts';
 import { missionsRouter } from './routes/missions.ts';
+import { runsRouter } from './routes/runs.ts';
 import { prospectsRouter } from './routes/prospects.ts';
 
 export interface AppDeps {
@@ -35,6 +37,8 @@ export interface AppDeps {
   agents?: AgentService;
   /** Profils IA et prompts versionnés des agents. */
   profiles?: AgentProfileService;
+  /** Exécutions des agents (prise de mission). */
+  runs?: RunService;
   /** Requêtes répétées des agents. Requis (avec agents et prospects) pour ouvrir /api/agent. */
   idempotency?: IdempotencyStore;
   /**
@@ -98,6 +102,8 @@ export function createApp(deps: AppDeps): Express {
 
   app.use('/api/health', healthRouter(deps));
   app.use('/api/missions', missionsRouter(deps.missions));
+  // Journal des exécutions des agents (utilisateur, lecture seule).
+  if (deps.runs) app.use('/api/runs', runsRouter(deps.runs));
   if (deps.prospects) app.use('/api/prospects', prospectsRouter(deps.prospects));
   if (deps.agents) {
     app.use(
@@ -119,6 +125,7 @@ export function createApp(deps: AppDeps): Express {
         quotas: deps.quotas,
         control: deps.agentControl,
         profiles: deps.profiles,
+        runs: deps.runs,
       }),
     );
   }

@@ -6,6 +6,7 @@ import {
   checkValidationDecision,
   getAvailableActions,
   getAvailableDecisions,
+  SYSTEM_MISSION_ACTIONS,
   type MissionAction,
   type MissionLifecycleState,
 } from './missionLifecycle';
@@ -30,6 +31,7 @@ const EXPECTED: Record<MissionStatus, Partial<Record<MissionAction, MissionStatu
     complete: 'completed',
     block: 'blocked',
     cancel: 'cancelled',
+    release: 'pending',
   },
   awaiting_validation: { cancel: 'cancelled' },
   paused: { resume: 'in_progress', cancel: 'cancelled' },
@@ -132,6 +134,29 @@ describe('états finaux', () => {
     for (const status of FINAL_MISSION_STATUSES) {
       expect(getAvailableActions(state(status))).toEqual([]);
       expect(getAvailableDecisions(state(status, { requiresValidation: true }))).toEqual([]);
+    }
+  });
+});
+
+describe('remise en attente (release), réservée au système', () => {
+  it('ramène une mission en cours en attente tant qu’il reste des tentatives', () => {
+    expect(checkMissionAction(state('in_progress', { attemptCount: 2 }), 'release')).toEqual({
+      allowed: true,
+      to: 'pending',
+    });
+  });
+
+  it('refusée quand plus aucune tentative n’est possible', () => {
+    expect(checkMissionAction(state('in_progress', { attemptCount: 3 }), 'release')).toMatchObject({
+      allowed: false,
+      code: 'MAX_ATTEMPTS_REACHED',
+    });
+  });
+
+  it('jamais proposée comme action disponible', () => {
+    expect(SYSTEM_MISSION_ACTIONS).toEqual(['release']);
+    for (const status of MISSION_STATUSES) {
+      expect(getAvailableActions(state(status))).not.toContain('release');
     }
   });
 });

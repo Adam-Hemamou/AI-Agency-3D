@@ -5,6 +5,7 @@ import { STALE_CHECK_INTERVAL_MS, startStaleRecovery } from './staleRecovery.ts'
 const recovered: RecoveredMission = {
   missionId: 'm1',
   agentId: 'agent-a',
+  runId: null,
   effects: { analyses: 0, productions: 0, decisions: 0, events: 0, output: false },
 };
 

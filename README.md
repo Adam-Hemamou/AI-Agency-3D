@@ -126,8 +126,15 @@ Agents IA (identité et clés API, détail dans [docs/ARCHITECTURE.md](docs/ARCH
 `POST /api/agents/:id/keys/:keyId/revoke`, `GET /api/agents/me` (avec `Authorization: Bearer <clé>`).
 API des agents ([détail](docs/ARCHITECTURE.md#7-quinquies-api-des-agents)) : `GET /api/agent/prospects/lookup`,
 `GET /api/agent/prospects/:id/context`, `POST /api/agent/prospects`, `PATCH /api/agent/prospects/:id`,
-`POST /api/agent/prospects/:id/{analyses|productions|stage|events}`, `POST /api/agent/missions/:id/transitions`.
-Chaque route exige une permission accordée par l’utilisateur et, pour les écritures, un en-tête `Idempotency-Key`.
+`POST /api/agent/prospects/:id/{analyses|productions|stage|events}`, `POST /api/agent/missions/:id/transitions`
+(mettre en pause, soumettre, terminer, bloquer).
+Exécutions des agents ([détail](docs/ARCHITECTURE.md#agents-ia-migration-20261105100000_agent_identities)) :
+`POST /api/agent/runs/claim`, `POST /api/agent/runs/:id/{heartbeat|failure}`, `GET /api/agent/runs/:id` ;
+journal pour l’utilisateur : `GET /api/runs`. **Un agent démarre ou reprend une mission uniquement par
+`POST /api/agent/runs/claim`**, qui crée son exécution tracée : la route des transitions lui refuse `start` et
+`resume` (l’utilisateur garde ces actions sur ses propres routes).
+Chaque route exige une permission accordée par l’utilisateur et, pour les écritures, un en-tête `Idempotency-Key`
+(pour les exécutions, l’identifiant d’exécution n8n joue ce rôle).
 Un agent ne peut jamais valider, décider ni envoyer un e-mail à la place de l’utilisateur.
 Limites globales par jour, tous agents confondus : 10 nouveaux prospects, 200 enrichissements, 100 productions.
 **Arrêt d’urgence** : bouton « Arrêt d’urgence » en haut de l’interface (immédiat), ou `AGENTS_ENABLED=false`

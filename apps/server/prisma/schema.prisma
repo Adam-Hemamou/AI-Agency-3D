@@ -55,6 +55,7 @@ model Mission {
   prospectId         String?   @map("prospect_id") @db.Char(36)
 
   events   MissionEvent[]
+  runs     AgentRun[]
   prospect Prospect?      @relation(fields: [prospectId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@index([status, priority])
@@ -109,6 +110,7 @@ model Agent {
   requests    AgentRequest[]
   profile     AgentProfile?
   prompts     AgentPrompt[]
+  runs        AgentRun[]
 
   @@map("agents")
 }
@@ -187,9 +189,53 @@ model AgentPrompt {
 
   agent    Agent          @relation(fields: [agentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   activeIn AgentProfile[] @relation("ActivePrompt")
+  runs     AgentRun[]
 
   @@id([agentId, version])
   @@map("agent_prompts")
+}
+
+/// Exécution : une tentative de travail d'un agent sur une mission (orchestrée par n8n).
+/// Au plus une exécution « started » par mission (colonne générée et index unique, en SQL).
+/// Une exécution terminée n'est plus modifiable (trigger). Seul le service des exécutions y écrit.
+model AgentRun {
+  id             String    @id @default(uuid(7)) @db.Char(36)
+  missionId      String    @map("mission_id") @db.Char(36)
+  agentId        String    @map("agent_id") @db.VarChar(64)
+  /// attemptCount de la mission au démarrage de cette exécution.
+  attempt        Int
+  /// AGENT_RUN_STATUSES.
+  status         String    @default("started") @db.VarChar(16)
+  /// Exécution n8n à l'origine (une seule prise de mission par exécution n8n et par agent).
+  n8nExecutionId String?   @map("n8n_execution_id") @db.VarChar(128)
+  /// Version du prompt utilisée (clé étrangère vers agent_prompts).
+  promptVersion  Int       @map("prompt_version")
+  /// Copie des paramètres du modèle utilisés (AgentModelSettings).
+  settings       Json
+  startedAt      DateTime  @map("started_at") @db.DateTime(3)
+  /// Dernier signal de vie reçu de n8n.
+  heartbeatAt    DateTime? @map("heartbeat_at") @db.DateTime(3)
+  finishedAt     DateTime? @map("finished_at") @db.DateTime(3)
+  /// AGENT_RUN_FAILURE_CODES (échec signalé) ou INTERRUPTED (récupération).
+  failureCode    String?   @map("failure_code") @db.VarChar(64)
+  failureMessage String?   @map("failure_message") @db.Text
+  /// Sortie brute du modèle, conservée uniquement en cas de rejet.
+  rawOutput      String?   @map("raw_output") @db.MediumText
+  promptTokens   Int?      @map("prompt_tokens")
+  outputTokens   Int?      @map("output_tokens")
+  llmMs          Int?      @map("llm_ms")
+
+  mission Mission     @relation(fields: [missionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  agent   Agent       @relation(fields: [agentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  prompt  AgentPrompt @relation(fields: [agentId, promptVersion], references: [agentId, version], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([agentId, n8nExecutionId])
+  @@index([missionId, status])
+  @@index([agentId, startedAt])
+  @@index([status, heartbeatAt])
+  /// Journal des exécutions (GET /api/runs) : tri chronologique sans tri en mémoire.
+  @@index([startedAt, id])
+  @@map("agent_runs")
 }
 
 /// Écriture demandée par un agent, identifiée par sa clé d'idempotence (en-tête Idempotency-Key).

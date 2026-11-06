@@ -97,6 +97,7 @@ describe('récupération des missions interrompues', () => {
       {
         missionId: id,
         agentId: agent.id,
+        runId: null, // mission démarrée sans exécution : comportement historique conservé
         effects: { analyses: 0, productions: 0, decisions: 0, events: 0, output: false },
       },
     ]);
