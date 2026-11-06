@@ -186,6 +186,10 @@ const AGENT_ENDPOINT_SAMPLES: readonly [method: string, path: string][] = [
   ['GET', '/api/agents/me'],
   ['GET', '/api/agent/quotas'],
   ['GET', '/api/agent/profile'],
+  ['POST', '/api/agent/runs/claim'],
+  ['GET', `/api/agent/runs/${ID}`],
+  ['POST', `/api/agent/runs/${ID}/heartbeat`],
+  ['POST', `/api/agent/runs/${ID}/failure`],
   ['GET', '/api/agent/missions'],
   ['GET', `/api/agent/missions/${ID}`],
   ['GET', '/api/agent/prospects/lookup?email=contact%40exemple.fr'],
@@ -248,6 +252,9 @@ describe('routes accessibles via Tailscale', () => {
       '/api/agents/emergency-stop',
       `/api/agents/${ID}`,
       `/api/agents/${ID}/keys`,
+      // Journal des exécutions (utilisateur) : jamais depuis le VPS.
+      '/api/runs',
+      '/api/runs?agentId=agent-x',
       // Gestion des profils et des prompts : jamais depuis le VPS.
       `/api/agents/${ID}/profile`,
       `/api/agents/${ID}/prompts`,

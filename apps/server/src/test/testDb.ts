@@ -1,6 +1,6 @@
 import mariadb from 'mariadb';
 import { inject } from 'vitest';
-import type { RoomId } from '@agency/shared';
+import { AGENT_MODEL_DEFAULTS, type RoomId } from '@agency/shared';
 import { createPrismaClient, type AppPrismaClient } from '../db/prisma.ts';
 
 /** URL de la base de test fournie par globalSetup. */
@@ -43,6 +43,7 @@ export async function resetDatabase(): Promise<void> {
       'agent_switch',
       'owner_sessions',
       'owner_credentials',
+      'agent_runs',
       'agent_profiles',
       'agent_prompts',
       'agent_requests',
@@ -69,4 +70,35 @@ export async function createTestAgent(
 ): Promise<void> {
   const now = new Date();
   await prisma.agent.create({ data: { id, name: id, room, createdAt: now, updatedAt: now } });
+}
+
+/** Prompt système des agents de test (base de test uniquement, jamais les bases réelles). */
+export const TEST_SYSTEM_PROMPT =
+  'Prompt de test : réponds uniquement en JSON conforme au schéma demandé.';
+
+/**
+ * Crée un agent de test avec un profil et un PROMPT ACTIF (version 1), directement en base de test :
+ * nécessaire pour qu'un agent puisse prendre une mission (refusé sans prompt actif).
+ */
+export async function createTestAgentWithPrompt(
+  prisma: AppPrismaClient,
+  id: string,
+  room: RoomId | null = null,
+  systemPrompt: string = TEST_SYSTEM_PROMPT,
+): Promise<void> {
+  const now = new Date();
+  await createTestAgent(prisma, id, room);
+  await prisma.agentPrompt.create({
+    data: { agentId: id, version: 1, systemPrompt, createdAt: now, createdBy: 'owner' },
+  });
+  await prisma.agentProfile.create({
+    data: {
+      agentId: id,
+      ...AGENT_MODEL_DEFAULTS,
+      activePromptVersion: 1,
+      createdAt: now,
+      updatedAt: now,
+      updatedBy: 'owner',
+    },
+  });
 }

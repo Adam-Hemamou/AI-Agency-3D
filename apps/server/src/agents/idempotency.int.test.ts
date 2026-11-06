@@ -289,18 +289,21 @@ describe('répétitions', () => {
     expect(replay.body.prospect.country).toBe('France');
   });
 
-  it('transition de mission : même événement renvoyé, aucun second démarrage', async () => {
+  it('transition de mission : même événement renvoyé, aucune seconde transition', async () => {
     const d = await prospects.createProspect(body('@mission'), { type: 'agent', id: AGENT_ID });
     const missionId = d.missions[0]!.id;
+    // Démarrage par le moteur (les agents démarrent par la prise de mission, pas par cette route).
+    await missions.applyAction(missionId, { action: 'start' }, { type: 'agent', id: AGENT_ID });
     const key = `n8n-${randomUUID()}`;
     const path = `/api/agent/missions/${missionId}/transitions`;
     const first = missionCommandResponseSchema.parse(
-      (await agentCall('post', path, { action: 'start' }, key).expect(200)).body,
+      (await agentCall('post', path, { action: 'pause' }, key).expect(200)).body,
     );
-    const again = await agentCall('post', path, { action: 'start' }, key).expect(200);
+    const again = await agentCall('post', path, { action: 'pause' }, key).expect(200);
     expect(again.headers['idempotent-replayed']).toBe('true');
     expect(missionCommandResponseSchema.parse(again.body).event.id).toBe(first.event.id);
-    expect((await missions.get(missionId)).attemptCount).toBe(1);
+    const pauses = (await missions.events(missionId)).filter((e) => e.action === 'pause');
+    expect(pauses).toHaveLength(1);
   });
 
   it('n’enregistre plus la réponse complète : seulement la ressource écrite', async () => {

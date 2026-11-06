@@ -36,6 +36,8 @@ export const ERROR_CODES = {
   AGENTS_DISABLED: 'AGENTS_DISABLED',
   /** Contact interdit : le prospect a refusé ou demandé à ne plus être contacté. */
   CONTACT_NOT_ALLOWED: 'CONTACT_NOT_ALLOWED',
+  /** L'agent n'a aucun prompt actif : il ne peut prendre aucune mission. */
+  AGENT_PROMPT_MISSING: 'AGENT_PROMPT_MISSING',
   INTERNAL_ERROR: 'INTERNAL_ERROR',
 } as const;
 

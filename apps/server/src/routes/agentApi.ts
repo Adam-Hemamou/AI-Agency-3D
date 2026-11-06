@@ -9,7 +9,11 @@ import {
   agentEventRequestSchema,
   agentProductionsAt,
   agentStageRequestSchema,
+  CLAIM_ONLY_MISSION_ACTIONS,
   canAgentSeeMission,
+  claimRunRequestSchema,
+  runFailureRequestSchema,
+  runHeartbeatRequestSchema,
   PRODUCTION_READ_PERMISSION,
   checkAgentProduction,
   missionListQuerySchema,
@@ -31,6 +35,7 @@ import {
 import type { AuthenticatedAgent } from '../agents/agentService.ts';
 import type { AgentControl } from '../agents/agentControl.ts';
 import type { AgentProfileService } from '../agents/agentProfileService.ts';
+import type { RunService } from '../agents/runService.ts';
 import { toAgentDossier } from '../agents/agentView.ts';
 import type { QuotaService } from '../agents/quotas.ts';
 import {
@@ -65,6 +70,8 @@ export interface AgentApiDeps {
   control: AgentControl;
   /** Profils IA (GET /profile). Facultatif : sans lui, la route n'existe pas (404). */
   profiles?: AgentProfileService;
+  /** Exécutions (POST /runs/claim). Facultatif : sans lui, les routes n'existent pas (404). */
+  runs?: RunService;
 }
 
 function forbidden(message: string): AppError {
@@ -100,6 +107,7 @@ export function agentApiRouter({
   quotas,
   control,
   profiles,
+  runs,
 }: AgentApiDeps): Router {
   const router = Router();
   /**
@@ -140,6 +148,48 @@ export function agentApiRouter({
   if (profiles) {
     router.get('/profile', async (_req, res) => {
       res.json(await profiles.selfProfile(agentOf(res).agent));
+    });
+  }
+
+  /**
+   * Prise de mission par n8n : la prochaine mission de l'agent est démarrée (ou reprise après une
+   * demande de modification) et son exécution créée, en une transaction.
+   * 201 : nouvelle prise ; 200 : même exécution n8n rejouée (identifiant n8n = clé d'idempotence) ;
+   * 204 : aucune mission disponible ; 409 AGENT_PROMPT_MISSING : aucun prompt actif.
+   */
+  if (runs) {
+    router.post('/runs/claim', async (req, res) => {
+      const { n8nExecutionId } = parseOrThrow(claimRunRequestSchema, req.body, 'Prise de mission');
+      const claimed = await runs.claim(agentOf(res), n8nExecutionId);
+      if (!claimed) {
+        res.status(204).end();
+        return;
+      }
+      res.status(claimed.replayed ? 200 : 201).json(claimed);
+    });
+
+    /** Signal de vie de l'exécution en cours (au moins toutes les 5 minutes pendant le travail). */
+    router.post('/runs/:id/heartbeat', async (req, res) => {
+      const { n8nExecutionId } = parseOrThrow(
+        runHeartbeatRequestSchema,
+        req.body ?? {},
+        'Signal de vie',
+      );
+      res.json(await runs.heartbeat(agentOf(res), String(req.params.id), n8nExecutionId));
+    });
+
+    /**
+     * Échec de l'exécution : elle est close, et le CRM décide de la suite (remise en attente sans
+     * effet et avec une tentative restante, sinon blocage). Le même échec renvoyé ne change rien.
+     */
+    router.post('/runs/:id/failure', async (req, res) => {
+      const request = parseOrThrow(runFailureRequestSchema, req.body, 'Échec de l’exécution');
+      res.json(await runs.fail(agentOf(res), String(req.params.id), request));
+    });
+
+    /** Une de SES exécutions et sa mission, en lecture seule (jamais la sortie brute). */
+    router.get('/runs/:id', async (req, res) => {
+      res.json(await runs.getForAgent(agentOf(res), String(req.params.id)));
     });
   }
 
@@ -357,8 +407,9 @@ export function agentApiRouter({
   );
 
   /**
-   * Transitions de mission. Le moteur vérifie, dans sa transaction : mission de l'agent, ou mission
-   * libre de sa salle qu'il démarre (elle lui est alors attribuée) ; ni annuler ni débloquer.
+   * Transitions de mission. Le moteur vérifie, dans sa transaction : mission de l'agent ; ni annuler
+   * ni débloquer. Démarrer et reprendre (entrer « en cours ») passent OBLIGATOIREMENT par
+   * POST /runs/claim, qui crée l'exécution : un agent ne travaille jamais sans exécution tracée.
    */
   router.post(
     '/missions/:id/transitions',
@@ -370,6 +421,11 @@ export function agentApiRouter({
       }),
       execute: async (req, res, hook) => {
         const request = parseOrThrow(missionTransitionRequestSchema, req.body, 'Transition');
+        if (CLAIM_ONLY_MISSION_ACTIONS.includes(request.action)) {
+          throw forbidden(
+            `Un agent ne peut pas effectuer l'action « ${request.action} » ici : la mission doit être prise par POST /api/agent/runs/claim (qui crée son exécution)`,
+          );
+        }
         await missions.applyAction(String(req.params.id), request, agentOf(res).actor, { hook });
       },
     }),

@@ -203,6 +203,13 @@ export const AGENT_MISSION_ACTIONS: readonly MissionAction[] = [
   'block',
 ];
 
+/**
+ * Actions qui font entrer une mission « en cours » : un agent ne les effectue JAMAIS par la route
+ * des transitions, uniquement par la prise de mission (POST /api/agent/runs/claim), qui crée
+ * l'exécution tracée. L'utilisateur garde ces actions sur ses propres routes.
+ */
+export const CLAIM_ONLY_MISSION_ACTIONS: readonly MissionAction[] = ['start', 'resume'];
+
 export function isAgentMissionAction(action: MissionAction): boolean {
   return AGENT_MISSION_ACTIONS.includes(action);
 }

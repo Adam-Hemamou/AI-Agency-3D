@@ -132,6 +132,74 @@ function concurrentModification(id: string): AppError {
   );
 }
 
+/**
+ * Ce que la mission a déjà produit depuis son premier démarrage : enregistrements qui la citent
+ * (analyses, productions, décisions, activités du dossier) et résultat transmis.
+ */
+export async function effectsSinceStartIn(tx: Db, mission: MissionRow): Promise<MissionEffects> {
+  const since = {
+    missionId: mission.id,
+    createdAt: { gte: mission.startedAt ?? mission.createdAt },
+  };
+  return {
+    analyses: await tx.prospectAnalysis.count({ where: since }),
+    productions: await tx.prospectProduction.count({ where: since }),
+    decisions: await tx.prospectDecision.count({ where: since }),
+    events: await tx.prospectEvent.count({ where: since }),
+    output: mission.output !== null,
+  };
+}
+
+/**
+ * Statut donné à l'exécution active quand sa mission quitte « en cours » (AGENT_RUN_STATUSES) :
+ * - terminée ou soumise à validation → succeeded ;
+ * - remise en attente → released ;
+ * - bloquée par la récupération des traitements interrompus → abandoned ;
+ * - mise en pause, bloquée ou annulée autrement → stopped.
+ * (Un échec signalé par n8n clôt lui-même son exécution, en failed ou released, avant la transition.)
+ */
+function runStatusOnExit(action: MissionEventAction, patch: MissionPatch, actor: Actor) {
+  switch (action) {
+    case 'complete':
+    case 'submit_for_validation':
+      return 'succeeded';
+    case 'release':
+      return 'released';
+    case 'block':
+      return actor.type === 'system' && patch.lastErrorCode === INTERRUPTED_ERROR_CODE
+        ? 'abandoned'
+        : 'stopped';
+    default:
+      return 'stopped';
+  }
+}
+
+/** Clôt l'exécution active de la mission (au plus une, garanti par la base), dans la transaction. */
+async function closeActiveRunIn(
+  tx: Db,
+  missionId: string,
+  exit: {
+    action: MissionEventAction;
+    patch: MissionPatch;
+    actor: Actor;
+    reason: string | null;
+    now: Date;
+  },
+): Promise<void> {
+  const status = runStatusOnExit(exit.action, exit.patch, exit.actor);
+  const blocked = exit.action === 'block';
+  await tx.agentRun.updateMany({
+    where: { missionId, status: 'started' },
+    data: {
+      status,
+      finishedAt: exit.now,
+      // Un blocage garde sa cause sur l'exécution (code et motif de la mission).
+      failureCode: blocked ? (exit.patch.lastErrorCode ?? null) : null,
+      failureMessage: blocked ? exit.reason : null,
+    },
+  });
+}
+
 /** Auteur des actions automatiques (récupération des traitements interrompus). */
 const SYSTEM_ACTOR: Actor = { type: 'system', id: null };
 
@@ -159,8 +227,20 @@ export const INTERRUPTED_ERROR_CODE = 'INTERRUPTED';
 export interface RecoveredMission {
   missionId: string;
   agentId: string | null;
+  /** Exécution active close en « abandoned » (null : la mission n'avait pas d'exécution active). */
+  runId: string | null;
   effects: MissionEffects;
 }
+
+/** Exécution active alors que sa mission n'est plus en cours, close par la récupération. */
+export interface ClosedOrphanRun {
+  runId: string;
+  missionId: string;
+  missionStatus: string;
+}
+
+/** Code enregistré sur une exécution incohérente (active, mission plus en cours) close par la récupération. */
+export const ORPHANED_RUN_ERROR_CODE = 'ORPHANED_RUN';
 
 /** Ce qu'une mission a déjà laissé depuis son démarrage (informe la décision humaine). */
 export interface MissionEffects {
@@ -236,6 +316,12 @@ export function createMissionService(
       data: { ...toPrismaData(patch), version: { increment: 1 }, updatedAt: now },
     });
     if (updated.count !== 1) throw concurrentModification(id);
+
+    // La mission quitte « en cours » : son exécution active est close DANS CETTE transaction
+    // (jamais d'exécution « started » pour une mission qui n'est plus en cours).
+    if (current.status === 'in_progress' && patch.status !== 'in_progress') {
+      await closeActiveRunIn(tx, id, { action, patch, actor, reason, now });
+    }
 
     const event = await tx.missionEvent.create({
       data: {
@@ -329,6 +415,40 @@ export function createMissionService(
     return { id: row.id, room: row.room };
   }
 
+  /**
+   * Préconditions de la remise en attente, vérifiées sous verrou de la mission (le même que celui
+   * des écritures d'agents qui la citent) : réservée au système, et refusée si la mission a déjà
+   * produit un effet depuis son démarrage. Indique aussi si la mission avait été prise par un
+   * agent au démarrage (elle était alors libre).
+   */
+  async function prepareReleaseIn(tx: Db, id: string, actor: Actor) {
+    if (actor.type !== 'system') {
+      throw forbiddenActor('Seul le système peut remettre une mission en attente');
+    }
+    await tx.$queryRaw`SELECT id FROM missions WHERE id = ${id} FOR UPDATE`;
+    const current = await tx.mission.findUnique({ where: { id } });
+    if (!current) throw missionNotFound(id);
+    if (current.status !== 'in_progress') return { claimed: false };
+    const effects = await effectsSinceStartIn(tx, current);
+    if (hasEffects(effects)) {
+      throw new AppError(
+        ERROR_CODES.INVALID_TRANSITION,
+        `La mission a déjà produit des effets : elle ne peut pas être remise en attente. ${describeEffects(effects)}`,
+        409,
+        { attempted: 'release', currentStatus: current.status, effects },
+      );
+    }
+    const starts = await tx.missionEvent.findMany({
+      where: { missionId: id, action: 'start' },
+      select: { changes: true },
+    });
+    const claimed = starts.some((event) => {
+      const change = (event.changes as Record<string, { from?: unknown; to?: unknown }>).agentId;
+      return change !== undefined && change.from === null && change.to === current.agentId;
+    });
+    return { claimed };
+  }
+
   async function applyActionIn(
     tx: Db,
     id: string,
@@ -342,6 +462,7 @@ export function createMissionService(
       );
     }
     const agent = actor.type === 'agent' ? await agentScopeIn(tx, actor.id) : null;
+    const release = request.action === 'release' ? await prepareReleaseIn(tx, id, actor) : null;
     return mutateIn(tx, id, request.expectedVersion, actor, (current, now) => {
       // Contrôlé sur la mission lue DANS la transaction : la mise à jour, conditionnée à sa
       // version, échoue si une autre requête l'a modifiée (ou attribuée) entre-temps.
@@ -359,6 +480,11 @@ export function createMissionService(
           patch.startedAt = current.startedAt ?? now;
           // Un agent qui démarre une mission libre la prend : elle n'appartient plus qu'à lui.
           if (agent && current.agentId === null) patch.agentId = agent.id;
+          break;
+        case 'release':
+          // Une mission prise par un agent (libre à l'origine) redevient libre ; une mission
+          // attribuée à la création garde son agent.
+          if (release?.claimed) patch.agentId = null;
           break;
         case 'submit_for_validation':
           if (request.output !== undefined) patch.output = request.output;
@@ -520,8 +646,15 @@ export function createMissionService(
      */
     async recoverStale({ staleAfterMs }: { staleAfterMs: number }): Promise<RecoveredMission[]> {
       const cutoff = new Date(clock().getTime() - staleAfterMs);
+      // Une exécution active « vivante » : dernier signal de vie (ou, à défaut, son démarrage)
+      // postérieur au seuil. Ces missions ne sont même pas candidates : une mission longuement
+      // maintenue en vie n'empêche jamais l'examen des missions réellement interrompues.
+      const alive: Prisma.AgentRunWhereInput = {
+        status: 'started',
+        OR: [{ heartbeatAt: { gte: cutoff } }, { heartbeatAt: null, startedAt: { gte: cutoff } }],
+      };
       const candidates = await prisma.mission.findMany({
-        where: { status: 'in_progress', updatedAt: { lt: cutoff } },
+        where: { status: 'in_progress', updatedAt: { lt: cutoff }, runs: { none: alive } },
         select: { id: true },
         orderBy: { updatedAt: 'asc' },
         take: 100,
@@ -531,14 +664,26 @@ export function createMissionService(
       for (const { id } of candidates) {
         try {
           const result = await prisma.$transaction(async (tx) => {
-            // PREMIÈRE instruction : verrou de la mission, avant toute lecture. Une écriture d'agent
-            // qui la cite (verrou partagé) passe donc entièrement avant ou entièrement après :
-            // les comptages ci-dessous voient tout ce qui a été enregistré avant ce verrou.
+            // PREMIÈRES instructions : verrous de la mission PUIS de son exécution active, avant
+            // toute lecture (même ordre que la prise de mission, l'échec et la clôture).
+            // - Une écriture d'agent qui cite la mission (verrou partagé) passe entièrement avant
+            //   ou entièrement après : les comptages ci-dessous voient tout ce qui a été enregistré.
+            // - Un signal de vie en cours (qui verrouille l'exécution) se termine d'abord : le
+            //   dernier signal lu ici est donc toujours le plus récent ; un signal arrivé après
+            //   attend, puis trouve l'exécution close (refusé).
             await tx.$queryRaw`SELECT id FROM missions WHERE id = ${id} FOR UPDATE`;
+            const [activeRun] = await tx.$queryRaw<
+              { id: string; heartbeat_at: Date | null; started_at: Date }[]
+            >`SELECT id, heartbeat_at, started_at FROM agent_runs
+              WHERE mission_id = ${id} AND status = 'started' FOR UPDATE`;
             const current = await tx.mission.findUnique({ where: { id } });
             if (!current || current.status !== 'in_progress' || current.updatedAt >= cutoff) {
               return null;
             }
+            // Exécution toujours vivante : signal de vie récent (ou démarrage récent sans signal).
+            const lastSignal = activeRun ? (activeRun.heartbeat_at ?? activeRun.started_at) : null;
+            if (lastSignal && new Date(lastSignal) >= cutoff) return null;
+
             const linked = { missionId: id };
             const recent = { ...linked, createdAt: { gte: cutoff } };
             const [recentAnalyses, recentProductions, recentDecisions, recentEvents] =
@@ -557,17 +702,13 @@ export function createMissionService(
             if (recentAnalyses + recentProductions + recentDecisions + recentEvents > 0)
               return null;
 
-            const since = { ...linked, createdAt: { gte: current.startedAt ?? current.createdAt } };
-            const effects: MissionEffects = {
-              analyses: await tx.prospectAnalysis.count({ where: since }),
-              productions: await tx.prospectProduction.count({ where: since }),
-              decisions: await tx.prospectDecision.count({ where: since }),
-              events: await tx.prospectEvent.count({ where: since }),
-              output: current.output !== null,
-            };
-            const message =
-              `Traitement interrompu : aucune activité depuis plus de ${minutes} min. ` +
-              describeEffects(effects);
+            const effects = await effectsSinceStartIn(tx, current);
+            const silence = activeRun
+              ? `aucun signal de vie de l’exécution n8n depuis plus de ${minutes} min (dernier : ${new Date(lastSignal!).toISOString()})`
+              : `aucune activité depuis plus de ${minutes} min`;
+            const message = `Traitement interrompu : ${silence}. ` + describeEffects(effects);
+            // Le blocage par le système avec le code INTERRUPTED clôt l'exécution active en
+            // « abandoned », dans cette transaction (clôture automatique du moteur).
             await mutateIn(tx, id, current.version, SYSTEM_ACTOR, () => ({
               action: 'block',
               patch: {
@@ -577,7 +718,12 @@ export function createMissionService(
               },
               reason: message,
             }));
-            return { missionId: id, agentId: current.agentId, effects };
+            return {
+              missionId: id,
+              agentId: current.agentId,
+              runId: activeRun?.id ?? null,
+              effects,
+            };
           });
           if (result) recovered.push(result);
         } catch (error) {
@@ -588,6 +734,51 @@ export function createMissionService(
         }
       }
       return recovered;
+    },
+
+    /**
+     * Exécutions incohérentes : actives alors que leur mission n'est plus en cours (impossible par
+     * le moteur depuis la clôture automatique, mais possible après une intervention directe en
+     * base). Elles sont closes en « abandoned » (code ORPHANED_RUN) ; la mission n'est pas touchée.
+     * Mêmes verrous que la récupération (mission puis exécution), revérifiés dans la transaction.
+     */
+    async closeOrphanRuns(): Promise<ClosedOrphanRun[]> {
+      const orphans = await prisma.$queryRaw<{ run_id: string; mission_id: string }[]>`
+        SELECT r.id AS run_id, r.mission_id FROM agent_runs r
+        JOIN missions m ON m.id = r.mission_id
+        WHERE r.status = 'started' AND m.status <> 'in_progress'
+        ORDER BY r.started_at ASC
+        LIMIT 100`;
+      const closed: ClosedOrphanRun[] = [];
+      for (const { run_id: runId, mission_id: missionId } of orphans) {
+        const result = await prisma.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT id FROM missions WHERE id = ${missionId} FOR UPDATE`;
+          await tx.$queryRaw`SELECT id FROM agent_runs WHERE id = ${runId} FOR UPDATE`;
+          const mission = await tx.mission.findUnique({
+            where: { id: missionId },
+            select: { status: true },
+          });
+          const run = await tx.agentRun.findUnique({
+            where: { id: runId },
+            select: { status: true },
+          });
+          if (!mission || !run || run.status !== 'started' || mission.status === 'in_progress') {
+            return null;
+          }
+          await tx.agentRun.update({
+            where: { id: runId },
+            data: {
+              status: 'abandoned',
+              finishedAt: clock(),
+              failureCode: ORPHANED_RUN_ERROR_CODE,
+              failureMessage: `Exécution encore active alors que la mission est « ${mission.status} » : close par la récupération`,
+            },
+          });
+          return { runId, missionId, missionStatus: mission.status };
+        });
+        if (result) closed.push(result);
+      }
+      return closed;
     },
   };
 }

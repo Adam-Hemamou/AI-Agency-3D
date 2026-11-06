@@ -31,6 +31,25 @@ export const AGENT_ROUTES: readonly AgentRoute[] = [
   { methods: READ, pattern: /^\/api\/agent\/quotas\/?$/, permission: null },
   // Son propre profil IA (rôle, paramètres, prompt actif) : nécessaire pour travailler.
   { methods: READ, pattern: /^\/api\/agent\/profile\/?$/, permission: null },
+  // Prise de mission par n8n : démarre une mission et crée son exécution.
+  { methods: ['POST'], pattern: /^\/api\/agent\/runs\/claim\/?$/, permission: 'missions:update' },
+  // Consultation de SON exécution (la propriété est vérifiée par le service), en lecture seule.
+  {
+    methods: READ,
+    pattern: new RegExp(`^/api/agent/runs/(?!claim/?$)${SEG}/?$`),
+    permission: 'missions:read',
+  },
+  // Signal de vie et échec de SON exécution (la propriété est vérifiée par le service).
+  {
+    methods: ['POST'],
+    pattern: new RegExp(`^/api/agent/runs/(?!claim/?$)${SEG}/heartbeat/?$`),
+    permission: 'missions:update',
+  },
+  {
+    methods: ['POST'],
+    pattern: new RegExp(`^/api/agent/runs/(?!claim/?$)${SEG}/failure/?$`),
+    permission: 'missions:update',
+  },
   { methods: READ, pattern: /^\/api\/agent\/missions\/?$/, permission: 'missions:read' },
   {
     methods: READ,
