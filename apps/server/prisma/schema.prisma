@@ -107,6 +107,8 @@ model Agent {
   apiKeys     AgentApiKey[]
   permissions AgentPermission[]
   requests    AgentRequest[]
+  profile     AgentProfile?
+  prompts     AgentPrompt[]
 
   @@map("agents")
 }
@@ -142,6 +144,52 @@ model AgentPermission {
 
   @@id([agentId, permission])
   @@map("agent_permissions")
+}
+
+/// Profil IA d'un agent (une ligne au plus par agent ; absente = valeurs par défaut, AGENT_MODEL_DEFAULTS).
+/// Modifié par l'utilisateur uniquement, via le service des profils.
+model AgentProfile {
+  agentId             String   @id @map("agent_id") @db.VarChar(64)
+  /// AGENT_ROLES, facultatif.
+  role                String?  @db.VarChar(16)
+  /// Modèle Ollama (ex. "qwen3:8b").
+  model               String   @db.VarChar(64)
+  temperature         Float
+  topP                Float    @map("top_p")
+  topK                Int      @map("top_k")
+  numCtx              Int      @map("num_ctx")
+  numPredict          Int      @map("num_predict")
+  /// false : pas de bloc de raisonnement dans la réponse (Qwen3).
+  think               Boolean
+  timeoutSeconds      Int      @map("timeout_seconds")
+  /// Version du prompt utilisée (clé étrangère vers agent_prompts), null = aucune.
+  activePromptVersion Int?     @map("active_prompt_version")
+  createdAt           DateTime @map("created_at") @db.DateTime(3)
+  updatedAt           DateTime @map("updated_at") @db.DateTime(3)
+  updatedBy           String   @map("updated_by") @db.VarChar(64)
+
+  agent        Agent        @relation(fields: [agentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  activePrompt AgentPrompt? @relation("ActivePrompt", fields: [agentId, activePromptVersion], references: [agentId, version], onDelete: Restrict, onUpdate: Restrict)
+
+  @@map("agent_profiles")
+}
+
+/// Version du prompt système d'un agent. Ajout uniquement : la base refuse toute modification
+/// ou suppression ; une modification crée une nouvelle version.
+model AgentPrompt {
+  agentId      String   @map("agent_id") @db.VarChar(64)
+  /// 1, 2, 3… par agent.
+  version      Int
+  systemPrompt String   @map("system_prompt") @db.MediumText
+  note         String?  @db.VarChar(500)
+  createdAt    DateTime @map("created_at") @db.DateTime(3)
+  createdBy    String   @map("created_by") @db.VarChar(64)
+
+  agent    Agent          @relation(fields: [agentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  activeIn AgentProfile[] @relation("ActivePrompt")
+
+  @@id([agentId, version])
+  @@map("agent_prompts")
 }
 
 /// Écriture demandée par un agent, identifiée par sa clé d'idempotence (en-tête Idempotency-Key).

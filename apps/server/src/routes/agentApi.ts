@@ -30,6 +30,7 @@ import {
 } from '@agency/shared';
 import type { AuthenticatedAgent } from '../agents/agentService.ts';
 import type { AgentControl } from '../agents/agentControl.ts';
+import type { AgentProfileService } from '../agents/agentProfileService.ts';
 import { toAgentDossier } from '../agents/agentView.ts';
 import type { QuotaService } from '../agents/quotas.ts';
 import {
@@ -62,6 +63,8 @@ export interface AgentApiDeps {
   quotas: QuotaService;
   /** Arrêt d'urgence, revérifié dans la transaction de chaque écriture. */
   control: AgentControl;
+  /** Profils IA (GET /profile). Facultatif : sans lui, la route n'existe pas (404). */
+  profiles?: AgentProfileService;
 }
 
 function forbidden(message: string): AppError {
@@ -96,6 +99,7 @@ export function agentApiRouter({
   idempotency,
   quotas,
   control,
+  profiles,
 }: AgentApiDeps): Router {
   const router = Router();
   /**
@@ -128,6 +132,16 @@ export function agentApiRouter({
   // ---------------------------------------------------------------------------
   // Lecture
   // ---------------------------------------------------------------------------
+
+  /**
+   * Profil IA de l'agent authentifié : rôle, paramètres du modèle et prompt actif. Toujours le
+   * sien : l'identité vient de la clé, aucun paramètre ne permet de lire celui d'un autre agent.
+   */
+  if (profiles) {
+    router.get('/profile', async (_req, res) => {
+      res.json(await profiles.selfProfile(agentOf(res).agent));
+    });
+  }
 
   router.get('/prospects/lookup', async (req, res) => {
     const query = parseOrThrow(prospectLookupQuerySchema, req.query, 'Recherche de doublons');

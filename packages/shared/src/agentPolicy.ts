@@ -122,6 +122,10 @@ export const AGENT_ROLE_PERMISSIONS: Record<AgentRole, readonly AgentPermission[
   ],
 };
 
+export function isAgentRole(value: unknown): value is AgentRole {
+  return typeof value === 'string' && (AGENT_ROLES as readonly string[]).includes(value);
+}
+
 export function isAgentPermission(value: unknown): value is AgentPermission {
   return typeof value === 'string' && (AGENT_PERMISSIONS as readonly string[]).includes(value);
 }

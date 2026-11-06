@@ -43,6 +43,8 @@ export async function resetDatabase(): Promise<void> {
       'agent_switch',
       'owner_sessions',
       'owner_credentials',
+      'agent_profiles',
+      'agent_prompts',
       'agent_requests',
       'agent_permissions',
       'agent_api_keys',

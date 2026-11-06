@@ -12,3 +12,4 @@ export * from './agentPolicy';
 export * from './agentApi';
 export * from './auth';
 export * from './agentLimits';
+export * from './agentProfiles';

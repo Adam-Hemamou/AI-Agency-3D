@@ -1,5 +1,6 @@
 import type { Server } from 'node:http';
 import pkg from '../package.json' with { type: 'json' };
+import { createAgentProfileService } from './agents/agentProfileService.ts';
 import { createAgentService } from './agents/agentService.ts';
 import { createAgentControl } from './agents/agentControl.ts';
 import { createIdempotencyStore } from './agents/idempotency.ts';
@@ -54,6 +55,7 @@ const app = createApp({
   missions,
   prospects: createProspectService({ prisma, missions, simulationMode: config.MODE_SIMULATION }),
   agents: createAgentService({ prisma }),
+  profiles: createAgentProfileService({ prisma }),
   idempotency: createIdempotencyStore(prisma),
   owner,
   quotas: createQuotaService({ prisma }),

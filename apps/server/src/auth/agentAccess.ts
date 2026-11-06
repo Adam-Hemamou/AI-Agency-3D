@@ -29,6 +29,8 @@ export const AGENT_ROUTES: readonly AgentRoute[] = [
   // API des agents.
   // Quotas globaux du jour : utiles à tout agent pour savoir s'il peut continuer.
   { methods: READ, pattern: /^\/api\/agent\/quotas\/?$/, permission: null },
+  // Son propre profil IA (rôle, paramètres, prompt actif) : nécessaire pour travailler.
+  { methods: READ, pattern: /^\/api\/agent\/profile\/?$/, permission: null },
   { methods: READ, pattern: /^\/api\/agent\/missions\/?$/, permission: 'missions:read' },
   {
     methods: READ,
