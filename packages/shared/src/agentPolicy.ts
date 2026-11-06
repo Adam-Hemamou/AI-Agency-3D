@@ -202,3 +202,64 @@ export const AGENT_MISSION_ACTIONS: readonly MissionAction[] = [
 export function isAgentMissionAction(action: MissionAction): boolean {
   return AGENT_MISSION_ACTIONS.includes(action);
 }
+
+// ---------------------------------------------------------------------------
+// Visibilité et attribution des missions
+// ---------------------------------------------------------------------------
+
+/** Ce qui décide de l'accès d'un agent à une mission. */
+export interface MissionScope {
+  agentId: string | null;
+  room: string;
+}
+
+/** L'agent concerné : son identifiant et sa salle de rattachement (null : aucune salle). */
+export interface AgentMissionScope {
+  id: string;
+  room: string | null;
+}
+
+/**
+ * Missions qu'un agent peut voir. SOURCE UNIQUE (liste, détail, dossier, transitions) :
+ * - agent rattaché à une salle : ses missions et les missions libres de SA salle ;
+ * - agent sans salle : uniquement ses missions (aucune mission libre, aucune autre salle).
+ * Jamais les missions d'un autre agent.
+ */
+export function canAgentSeeMission(mission: MissionScope, agent: AgentMissionScope): boolean {
+  if (agent.room === null) return mission.agentId === agent.id;
+  return mission.room === agent.room && (mission.agentId === agent.id || mission.agentId === null);
+}
+
+/**
+ * Action d'un agent sur une mission : il doit la voir, et une mission libre ne peut être que
+ * démarrée (le démarrage la lui attribue). Les règles du cycle de vie s'appliquent ensuite.
+ */
+export function checkAgentMissionAccess(
+  mission: MissionScope,
+  agent: AgentMissionScope,
+  action: MissionAction,
+): { allowed: true } | { allowed: false; reason: string } {
+  if (mission.agentId !== null && mission.agentId !== agent.id) {
+    return {
+      allowed: false,
+      reason: `Cette mission est attribuée à un autre agent (${mission.agentId})`,
+    };
+  }
+  if (!canAgentSeeMission(mission, agent)) {
+    return {
+      allowed: false,
+      reason:
+        agent.room === null
+          ? 'Un agent sans salle ne peut agir que sur les missions qui lui sont attribuées'
+          : `Cette mission appartient à une autre salle (${mission.room})`,
+    };
+  }
+  if (mission.agentId === null && action !== 'start') {
+    return {
+      allowed: false,
+      reason:
+        'Mission libre : démarrez-la (action « start ») pour la prendre avant toute autre action',
+    };
+  }
+  return { allowed: true };
+}

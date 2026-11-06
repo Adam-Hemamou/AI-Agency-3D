@@ -9,6 +9,7 @@ import {
   agentEventRequestSchema,
   agentProductionsAt,
   agentStageRequestSchema,
+  canAgentSeeMission,
   PRODUCTION_READ_PERMISSION,
   checkAgentProduction,
   missionListQuerySchema,
@@ -19,6 +20,7 @@ import {
   hasChannelIdentifier,
   missionTransitionRequestSchema,
   prospectLookupQuerySchema,
+  type AgentMissionScope,
   type AgentProspectContext,
   type AgentQuotaAction,
   type ProductionKind,
@@ -76,6 +78,11 @@ function agentOf(res: Response): AuthenticatedAgent {
   return agent;
 }
 
+/** Identité et salle de l'agent, pour décider des missions qu'il voit (canAgentSeeMission). */
+function missionScopeOf(agent: AuthenticatedAgent): AgentMissionScope {
+  return { id: agent.agent.id, room: agent.agent.room };
+}
+
 /** Étapes vers lesquelles CET agent peut faire passer un dossier (salle de l'agent comprise). */
 function allowedStagesFor(agent: AuthenticatedAgent, stage: ProspectStage): ProspectStage[] {
   if (!agent.permissions.has('stages:advance')) return [];
@@ -108,7 +115,9 @@ export function agentApiRouter({
    * actuelles de l'agent (première réponse comme répétition).
    */
   const renderDossier = async (resource: WriteResource, res: Response) =>
-    toAgentDossier(await prospects.getDossier(resource.id), agentOf(res).permissions);
+    toAgentDossier(await prospects.getDossier(resource.id), agentOf(res).permissions, {
+      missionsOf: missionScopeOf(agentOf(res)),
+    });
 
   // Aucune de ces routes n'est accessible à l'utilisateur humain : elles parlent au nom d'un agent.
   router.use((_req, res, next) => {
@@ -133,7 +142,8 @@ export function agentApiRouter({
 
   /**
    * Missions, pour les agents : sans historique (les événements portent les motifs des décisions
-   * humaines). Un agent rattaché à une salle ne voit que les missions de sa salle.
+   * humaines). Uniquement celles que l'agent peut voir (canAgentSeeMission) : les siennes et,
+   * s'il est rattaché à une salle, les missions libres de cette salle. Jamais celles d'un autre agent.
    */
   router.get('/missions', async (req, res) => {
     const agent = agentOf(res);
@@ -142,14 +152,20 @@ export function agentApiRouter({
     if (room && query.room && query.room.some((r) => r !== room)) {
       throw forbidden(`Cet agent ne voit que les missions de sa salle (${ROOM_LABELS[room]})`);
     }
-    res.json(await missions.list(room ? { ...query, room: [room] } : query));
+    res.json(await missions.list(query, { visibleTo: missionScopeOf(agent) }));
   });
 
   router.get('/missions/:id', async (req, res) => {
     const agent = agentOf(res);
     const mission = await missions.get(req.params.id);
-    if (agent.agent.room && mission.room !== agent.agent.room) {
-      throw forbidden('Cette mission appartient à une autre salle');
+    if (!canAgentSeeMission(mission, missionScopeOf(agent))) {
+      throw forbidden(
+        mission.agentId !== null && mission.agentId !== agent.agent.id
+          ? 'Cette mission est attribuée à un autre agent'
+          : agent.agent.room
+            ? 'Cette mission appartient à une autre salle'
+            : 'Un agent sans salle ne voit que les missions qui lui sont attribuées',
+      );
     }
     res.json(mission);
   });
@@ -159,7 +175,7 @@ export function agentApiRouter({
     const dossier = await prospects.getDossier(req.params.id);
     const { stage } = dossier.prospect;
     const body: AgentProspectContext = {
-      dossier: toAgentDossier(dossier, agent.permissions),
+      dossier: toAgentDossier(dossier, agent.permissions, { missionsOf: missionScopeOf(agent) }),
       workflow: {
         stage,
         room: PROSPECT_STAGE_ROOMS[stage],
@@ -327,8 +343,8 @@ export function agentApiRouter({
   );
 
   /**
-   * Transitions de mission : uniquement sur une mission attribuée à l'agent ou libre,
-   * et de sa salle s'il en a une. Le moteur refuse en outre annuler et débloquer.
+   * Transitions de mission. Le moteur vérifie, dans sa transaction : mission de l'agent, ou mission
+   * libre de sa salle qu'il démarre (elle lui est alors attribuée) ; ni annuler ni débloquer.
    */
   router.post(
     '/missions/:id/transitions',
@@ -339,18 +355,8 @@ export function agentApiRouter({
         event: await missions.event(resource.id, resource.eventId!),
       }),
       execute: async (req, res, hook) => {
-        const agent = agentOf(res);
         const request = parseOrThrow(missionTransitionRequestSchema, req.body, 'Transition');
-        const mission = await missions.get(String(req.params.id));
-        if (mission.agentId !== null && mission.agentId !== agent.agent.id) {
-          throw forbidden(`Cette mission est attribuée à un autre agent (${mission.agentId})`);
-        }
-        if (agent.agent.room && mission.room !== agent.agent.room) {
-          throw forbidden(
-            `Cette mission appartient à une autre salle (${ROOM_LABELS[mission.room as RoomId] ?? mission.room})`,
-          );
-        }
-        await missions.applyAction(mission.id, request, agent.actor, { hook });
+        await missions.applyAction(String(req.params.id), request, agentOf(res).actor, { hook });
       },
     }),
   );

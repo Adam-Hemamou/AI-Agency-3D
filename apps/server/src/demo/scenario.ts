@@ -27,6 +27,17 @@ const AGENTS = {
   sales: { type: 'agent', id: 'agent-commercial' },
   writer: { type: 'agent', id: 'agent-redacteur' },
 } satisfies Record<string, Actor>;
+/**
+ * Salle de chaque agent fictif. Les agents existent en base (sans clé ni permission) : une mission
+ * ne peut être attribuée qu'à un agent existant, et un agent ne prend que les missions de sa salle.
+ */
+const AGENT_ROOMS: Record<keyof typeof AGENTS, RoomId> = {
+  prospector: 'prospecting',
+  analyst: 'analysis',
+  dubbing: 'dubbing',
+  sales: 'copywriting',
+  writer: 'email_review',
+};
 const OWNER: Actor = { type: 'user', id: 'owner' };
 const SYSTEM: Actor = { type: 'system', id: null };
 
@@ -57,6 +68,18 @@ export async function seedDemo(prisma: AppPrismaClient) {
     missions,
     simulationMode: true,
     clock: clock.now,
+  });
+
+  const createdAt = new Date(origin - 30 * DAY);
+  await prisma.agent.createMany({
+    data: (Object.keys(AGENTS) as (keyof typeof AGENTS)[]).map((key) => ({
+      id: AGENTS[key].id,
+      name: `${AGENTS[key].id} (fictif)`,
+      description: 'Agent fictif de la démonstration : aucune clé, aucune permission.',
+      room: AGENT_ROOMS[key],
+      createdAt,
+      updatedAt: createdAt,
+    })),
   });
 
   const dateBefore = (daysAgo: number) => new Date(origin - daysAgo * DAY).toISOString();

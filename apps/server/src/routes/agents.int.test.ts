@@ -18,7 +18,7 @@ import { createMissionService } from '../missions/missionService.ts';
 import { createProspectService } from '../prospects/prospectService.ts';
 import { ownerClient, type OwnerClient } from '../test/ownerSession.ts';
 import { testAgentLimits } from '../test/agentLimits.ts';
-import { createTestPrisma, resetDatabase } from '../test/testDb.ts';
+import { createTestAgent, createTestPrisma, resetDatabase } from '../test/testDb.ts';
 
 const prisma = createTestPrisma();
 const missions = createMissionService(prisma);
@@ -262,6 +262,7 @@ describe('requêtes authentifiées par une clé d’agent', () => {
   });
 
   it('les actions de l’interface restent attribuées à l’utilisateur humain', async () => {
+    await createTestAgent(prisma, pipelineAgent.id!, 'director');
     const id = await missionAwaitingValidation();
     const res = await owner.post(`/api/missions/${id}/validation`).send({ decision: 'approve' });
     expect(res.status).toBe(200);

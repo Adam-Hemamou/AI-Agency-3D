@@ -1,3 +1,4 @@
+import type { Server } from 'node:http';
 import pkg from '../package.json' with { type: 'json' };
 import { createAgentService } from './agents/agentService.ts';
 import { createAgentControl } from './agents/agentControl.ts';
@@ -9,7 +10,10 @@ import { DEMO_SERVER_PORT, isDemoDataset, resolveDemoDatabaseUrl } from './confi
 import { loadConfig, type AppConfig } from './config/env.ts';
 import { createDatabaseProbe, createPrismaClient } from './db/prisma.ts';
 import { logger } from './lib/logger.ts';
-import { createMissionService } from './missions/missionService.ts';
+import { createMissionService, hasEffects } from './missions/missionService.ts';
+import { startStaleRecovery } from './missions/staleRecovery.ts';
+import { createShutdown } from './network/shutdown.ts';
+import { closeServers, SHUTDOWN_TIMEOUT_MS, startTailnetListener } from './network/tailnet.ts';
 import { createProspectService } from './prospects/prospectService.ts';
 
 let config: AppConfig;
@@ -24,6 +28,9 @@ try {
       SERVER_PORT: DEMO_SERVER_PORT,
       // La démonstration ne peut jamais déclencher d'action externe réelle.
       MODE_SIMULATION: true,
+      // Ni être joignable depuis une autre machine : écoute locale uniquement.
+      TAILSCALE_BIND_ADDRESS: '',
+      TAILSCALE_ALLOWED_PEER: '',
     };
   }
 } catch (error) {
@@ -83,12 +90,63 @@ server.on('error', (error) => {
   process.exit(1);
 });
 
-async function shutdown(signal: string): Promise<void> {
-  logger.info(`${signal} reçu, arrêt en cours…`);
-  server.close();
-  await prisma.$disconnect();
-  process.exit(0);
+/** Deuxième écoute (Tailscale), réservée au VPS. Son échec n'arrête jamais l'API locale. */
+let tailnetServer: Server | undefined;
+if (config.TAILSCALE_BIND_ADDRESS) {
+  const { TAILSCALE_BIND_ADDRESS: host, TAILSCALE_ALLOWED_PEER: allowedPeer } = config;
+  startTailnetListener(app, {
+    host,
+    port: config.SERVER_PORT,
+    allowedPeer,
+    onRejected: (remote) => logger.warn(`Tailscale : connexion refusée depuis ${remote}`),
+    onRouteRejected: (method, url) =>
+      logger.warn(`Tailscale : route refusée (hors routes des agents) : ${method} ${url}`),
+  }).then(
+    (started) => {
+      tailnetServer = started;
+      started.on('error', (error) => logger.error('Écoute Tailscale : erreur', error));
+      logger.info(
+        `API aussi joignable via Tailscale sur http://${host}:${config.SERVER_PORT} (uniquement depuis ${allowedPeer}, routes /api/health, /api/agent/… et GET /api/agents/me seulement)`,
+      );
+    },
+    (error: unknown) =>
+      logger.error(
+        `Écoute Tailscale impossible sur ${host}:${config.SERVER_PORT} (Tailscale démarré ?). API locale maintenue.`,
+        error,
+      ),
+  );
 }
+
+/**
+ * Missions interrompues (« en cours » sans activité depuis MISSION_STALE_MINUTES) : passées en
+ * « bloquée », jamais remises en attente. Désactivé en démonstration (dates fictives passées).
+ */
+const staleRecovery = demoMode
+  ? null
+  : startStaleRecovery({
+      recover: () => missions.recoverStale({ staleAfterMs: config.MISSION_STALE_MINUTES * 60_000 }),
+      onRecovered: (m) =>
+        logger.warn(
+          `Mission ${m.missionId} bloquée : traitement interrompu (agent ${m.agentId ?? 'aucun'}, ` +
+            `${hasEffects(m.effects) ? 'effets déjà enregistrés, à vérifier' : 'aucun effet'}).`,
+        ),
+      onError: (error) => logger.error('Récupération des missions interrompues : échec', error),
+    });
+
+const shutdown = createShutdown({
+  // Requêtes en cours : SHUTDOWN_TIMEOUT_MS (5 s) au plus, puis connexions coupées.
+  closeServers: () => {
+    staleRecovery?.stop();
+    return closeServers([server, tailnetServer], {
+      timeoutMs: SHUTDOWN_TIMEOUT_MS,
+      onForced: () =>
+        logger.warn('Arrêt : requêtes encore en cours après 5 s, connexions coupées.'),
+    });
+  },
+  disconnect: () => prisma.$disconnect(),
+  exit: (code) => process.exit(code),
+  log: logger,
+});
 
 process.on('SIGINT', () => void shutdown('SIGINT'));
 process.on('SIGTERM', () => void shutdown('SIGTERM'));

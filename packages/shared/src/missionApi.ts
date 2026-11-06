@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { agentIdSchema } from './agents';
 import {
   ACTIONS_REQUIRING_REASON,
   ACTIONS_WITH_OUTPUT,
@@ -49,7 +50,8 @@ export const createMissionRequestSchema = z.strictObject({
   input: jsonObjectSchema.default({}),
   /** Fixé à la création, non modifiable ensuite : impossible de contourner une validation. */
   requiresValidation: z.boolean().default(false),
-  agentId: z.string().trim().min(1).max(64).nullable().default(null),
+  /** Agent responsable : identifiant « agent-… » d'un agent existant (vérifié par le serveur). */
+  agentId: agentIdSchema.nullable().default(null),
   /** Prospect concerné par la mission (dossier central), si pertinent. */
   prospectId: z.string().min(1).max(36).nullable().default(null),
   maxAttempts: z

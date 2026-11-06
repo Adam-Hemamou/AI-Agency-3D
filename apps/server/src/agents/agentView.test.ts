@@ -161,8 +161,10 @@ const dossier = {
   ],
 } as unknown as ProspectDossier;
 
+/** Lecteur par défaut : agent-x, rattaché à la salle de suivi. */
+const viewer = { missionsOf: { id: 'agent-x', room: 'followup' } };
 const view = (permissions: readonly AgentPermission[]) =>
-  toAgentDossier(dossier, new Set(permissions));
+  toAgentDossier(dossier, new Set(permissions), viewer);
 const role = (r: AgentRole) => view(AGENT_ROLE_PERMISSIONS[r]);
 const text = (r: AgentRole) => JSON.stringify(role(r));
 
@@ -284,7 +286,7 @@ describe('autorisations explicites', () => {
       ...dossier,
       events: [{ id: 99, type: 'nouveau_type', payload: {}, details: 'x', ...human }],
     } as unknown as ProspectDossier;
-    expect(toAgentDossier(extra, new Set(AGENT_PERMISSIONS)).events).toEqual([]);
+    expect(toAgentDossier(extra, new Set(AGENT_PERMISSIONS), viewer).events).toEqual([]);
   });
 
   it('les rôles n’ont jamais d’autorisation explicite par défaut', () => {
@@ -300,5 +302,36 @@ describe('contrat', () => {
     // Le dossier d'essai est volontairement incomplet ailleurs : seule la fiche prospect est vérifiée.
     const v = role('prospector');
     expect(agentDossierSchema.shape.prospect.safeParse(v.prospect).success).toBe(true);
+  });
+});
+
+describe('missions du dossier vues par un agent', () => {
+  const mission = (id: string, agentId: string | null, room: string) => ({ id, agentId, room });
+  const withMissions = {
+    ...dossier,
+    missions: [
+      mission('m-mienne', 'agent-x', 'followup'),
+      mission('m-libre-ma-salle', null, 'followup'),
+      mission('m-autre-agent', 'agent-y', 'followup'),
+      mission('m-libre-autre-salle', null, 'analysis'),
+      mission('m-mienne-autre-salle', 'agent-x', 'analysis'),
+    ],
+  } as unknown as ProspectDossier;
+  const ids = (scope: { id: string; room: string | null }) =>
+    toAgentDossier(withMissions, new Set(AGENT_PERMISSIONS), { missionsOf: scope }).missions.map(
+      (m) => m.id,
+    );
+
+  it('agent rattaché à une salle : ses missions et les missions libres de sa salle uniquement', () => {
+    expect(ids({ id: 'agent-x', room: 'followup' })).toEqual(['m-mienne', 'm-libre-ma-salle']);
+  });
+
+  it('agent sans salle : uniquement ses missions, aucune mission libre', () => {
+    expect(ids({ id: 'agent-x', room: null })).toEqual(['m-mienne', 'm-mienne-autre-salle']);
+  });
+
+  it('jamais les missions d’un autre agent, même avec toutes les permissions', () => {
+    expect(ids({ id: 'agent-z', room: 'followup' })).toEqual(['m-libre-ma-salle']);
+    expect(ids({ id: 'agent-z', room: null })).toEqual([]);
   });
 });

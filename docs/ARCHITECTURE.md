@@ -175,6 +175,22 @@ et **uniquement par un utilisateur** (un agent ou le système reçoit `FORBIDDEN
 - **Origine des actions** : déterminée par le serveur pour chaque requête (voir [§ 7 quater](#7-quater-identité-et-authentification-des-agents)) :
   une clé d'agent valide → cet agent ; aucune clé → l'utilisateur (`user` / `owner`). Le système agit avec
   l'identité `system`.
+- **Attribution (phase 1 agents)** : un agent qui démarre une mission libre la **prend** (`agent_id` renseigné dans
+  la même écriture, tracé dans l'événement `start`). Le contrôle « mission de l'agent, ou libre de sa salle » est fait
+  sur la mission lue **dans** la transaction ; la condition de version garantit qu'un seul agent l'obtient (l'autre
+  reçoit 403 ou 409). Une mission libre ne peut qu'être démarrée par un agent. À la création, `agentId` doit avoir le
+  format `agent-…` et désigner un agent existant (400 sinon).
+- **Missions interrompues** : une mission `in_progress` sans **aucune activité** depuis `MISSION_STALE_MINUTES`
+  (60 par défaut, .env) passe en `blocked`, au nom du système, code `INTERRUPTED` (`missions.recoverStale`,
+  lancé au démarrage puis toutes les 5 minutes ; désactivé en démonstration). Activité = une transition de la mission,
+  ou une analyse, production, décision ou activité du dossier qui la cite : un agent engagé dans un long traitement
+  signale qu'il avance en ajoutant une activité liée à la mission. Le motif liste les effets déjà enregistrés depuis le
+  démarrage. **Jamais de retour automatique en `pending`** : l'utilisateur débloque (nouvelle tentative, limitée par
+  `maxAttempts`) ou annule. Chaque blocage est revérifié dans sa transaction : si l'agent agit au même moment, une
+  seule des deux actions est enregistrée. La récupération verrouille la mission (`FOR UPDATE`) avant toute lecture,
+  et une écriture d'agent qui la cite la lit avec un verrou partagé (`FOR SHARE`) : si l'écriture passe la première,
+  la récupération la voit et ne bloque pas ; sinon l'écriture trouve la mission bloquée et est refusée (409). Un effet
+  enregistré au même moment n'est donc jamais ignoré.
 
 ### Historique (`mission_events`)
 
@@ -202,7 +218,7 @@ dans `packages/shared`, et seul le moteur écrit dans ces tables, après validat
 qui dupliquerait ces listes.
 
 `agent_id` n'a pas de clé étrangère vers `agents` : des missions existantes citent des agents qui n'ont pas
-(encore) d'identité enregistrée.
+(encore) d'identité enregistrée. Pour les **nouvelles** missions, le moteur vérifie que l'agent existe.
 
 ### CRM : un dossier unique par prospect (migration `20261104120000_prospect_dossiers`)
 
@@ -340,7 +356,7 @@ Contrat : `packages/shared/src/agentApi.ts` ; règles : `packages/shared/src/age
 | `POST /api/agent/prospects/:id/stage`                    | `stages:advance`    | Faire avancer le prospect (étapes autorisées uniquement)                     |
 | `POST /api/agent/prospects/:id/events`                   | `events:write`      | Ajouter une activité à l'historique (type `agent_activity`)                  |
 | `POST /api/agent/missions/:id/transitions`               | `missions:update`   | Démarrer, mettre en pause, reprendre, soumettre, terminer, bloquer           |
-| `GET /api/agent/missions`, `GET /api/agent/missions/:id` | `missions:read`     | Missions (sans historique) ; limitées à la salle de l'agent s'il en a une    |
+| `GET /api/agent/missions`, `GET /api/agent/missions/:id` | `missions:read`     | Missions (sans historique) : les siennes et les libres de sa salle           |
 
 **Lecture filtrée (lot D).** Les agents ne lisent **que** par `/api/agent/…` : toutes les routes de l'interface leur
 sont fermées, même en lecture (elles renvoient le dossier complet et l'historique des missions, qui contient les motifs
@@ -381,7 +397,13 @@ Aucun rôle n'a `decisions:read` ni `notes:read`.
   Le refus est appliqué dans `moveToStage` pour tout auteur de type agent. La mission de la nouvelle salle est créée
   par le serveur ; celles de « à valider » et « validation e-mail » **exigent la validation humaine**.
 - **Salle** : un agent rattaché à une salle ne fait avancer que les dossiers de sa salle et n'agit que sur les missions de sa salle.
-- **Missions** : uniquement une mission attribuée à l'agent ou libre. Annuler et débloquer sont refusés **par le moteur**.
+- **Missions** (`canAgentSeeMission`, `packages/shared/src/agentPolicy.ts`, règle unique pour la liste, le détail,
+  le dossier et les transitions) : un agent rattaché à une salle voit ses missions et les missions **libres de sa salle** ;
+  un agent **sans salle** ne voit que ses missions et ne peut prendre aucune mission libre. Jamais les missions d'un autre
+  agent, y compris dans le dossier. Annuler et débloquer sont refusés **par le moteur**.
+- **Mission citée** par une analyse, une production ou une activité (`missionId`) : pour un agent, elle doit concerner
+  le dossier, **lui être attribuée**, être visible par lui (sa salle) et être **`in_progress`** (403 sinon pour
+  l'attribution, 409 pour le statut). L'utilisateur et le système gardent la seule vérification du dossier.
 - **Analyses** : à l'étape d'analyse uniquement.
 - **Productions** : extrait et doublage à l'étape doublage (`draft`, `generated`, `failed`) ; proposition à l'étape
   proposition et e-mail aux étapes proposition et validation e-mail (`draft`, `pending_review`). Jamais `approved`,
@@ -564,7 +586,8 @@ brancher les vrais statuts ne demandera aucune réécriture des animations.
 
 - `MODE_SIMULATION=true` par défaut. Seule la valeur exacte `false` le désactive ; toute autre valeur fait échouer le démarrage.
 - Tout fournisseur réel devra lever `AppError.externalActionBlocked()` tant que le mode simulation est actif.
-- L'API et MySQL n'écoutent que sur `127.0.0.1` (pas d'accès depuis le réseau).
+- L'API et MySQL n'écoutent que sur `127.0.0.1` (pas d'accès depuis le réseau). Exception facultative : une
+  deuxième écoute de l'API sur l'adresse Tailscale, réservée au VPS et aux routes des agents ([§ 9 ter](#9-ter-accès-du-vps-via-tailscale)).
 - **Refus par défaut** : toute requête qui n'est ni celle d'une session humaine valide, ni celle d'un agent muni
   de sa clé, reçoit 401. Seuls `GET /api/health`, `GET /api/auth/session` et `POST /api/auth/login` sont publics.
   Voir [§ 9 bis](#9-bis-authentification-de-lutilisateur).
@@ -598,6 +621,40 @@ Lot A du renforcement de la sécurité (`apps/server/src/auth/`, migration `2026
 | `GET /api/auth/session` | État de la session (public)                        |
 | `POST /api/auth/login`  | Connexion (`password`) ; pose le cookie de session |
 | `POST /api/auth/logout` | Ferme la session                                   |
+
+## 9 ter. Accès du VPS via Tailscale
+
+n8n tourne sur un VPS ; il joint l'API du PC par **Tailscale** (réseau privé chiffré), jamais par Internet.
+Code : `apps/server/src/network/tailnet.ts` (écoute filtrée) et `network/shutdown.ts` (arrêt propre).
+
+- **Deux écoutes** : `127.0.0.1` (inchangée, toutes les routes, pour l'interface) et, si configurée, une **deuxième
+  écoute sur l'adresse Tailscale du PC**. Jamais `0.0.0.0` ni `::` : refusés au démarrage.
+- **Configuration** (`.env`, lue au démarrage uniquement) : `TAILSCALE_BIND_ADDRESS` (adresse Tailscale du PC) et
+  `TAILSCALE_ALLOWED_PEER` (adresse Tailscale du VPS), renseignées ensemble ou pas du tout ; l'adresse d'écoute doit
+  figurer dans `ALLOWED_HOSTS`. Adresses IPv4 de la plage Tailscale (`100.64.0.0/10`) en écriture décimale stricte
+  (`net.isIPv4`) : zéros en tête, hexadécimal, formes abrégées ou adresses hors plage sont refusés. Ignorées en
+  démonstration (toujours locale).
+- **Filtre 1, à la connexion TCP**, avant toute lecture HTTP : une connexion qui ne vient pas exactement du VPS est
+  coupée sans réponse (et journalisée).
+- **Filtre 2, à la requête** : seules `/api/health`, `/api/agent/…` et `GET /api/agents/me` (chemin exact) atteignent
+  l'application ; toute autre route reçoit 403 (connexion de l'interface, administration des agents, routes du CRM).
+  Comparaison stricte du chemin : `..`, `//`, encodages, antislash et URL absolues sont refusés.
+- **Protections inchangées** ensuite : contrôle `Host`, clé d'agent obligatoire (`Authorization: Bearer`), liste
+  blanche et permissions, débit, quotas, arrêt d'urgence.
+- **Tailscale arrêté ou adresse indisponible** au démarrage : seule l'écoute locale démarre (erreur journalisée) ;
+  redémarrer l'API une fois Tailscale connecté.
+- **Arrêt propre** : les deux écoutes se ferment ; les requêtes en cours ont 5 s pour finir, puis les connexions sont
+  coupées ; un second Ctrl+C quitte immédiatement.
+- **Pare-feu Windows** : à compléter par une règle n'autorisant que le VPS sur le port de l'API, côté adresse
+  Tailscale (non créée par le projet).
+
+Exemple (adresses fictives) :
+
+```
+ALLOWED_HOSTS=100.90.1.10
+TAILSCALE_BIND_ADDRESS=100.90.1.10
+TAILSCALE_ALLOWED_PEER=100.90.2.20
+```
 
 ## 10. Gestion des erreurs
 
@@ -705,49 +762,52 @@ Chaque phase est validée avant de passer à la suivante.
 
 ## 13. Journal des décisions techniques
 
-| Date       | Décision                                                                                                                                                                                                                                                     |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 29/10/2026 | **TypeScript 6.0** et non 7.0 : l'outil de lint (typescript-eslint) ne prend pas encore en charge TypeScript 7.                                                                                                                                              |
-| 29/10/2026 | **Prisma 7.10** (dernière version stable) et non 8.0, encore en préversion. Prisma 7 impose un adaptateur de pilote : `@prisma/adapter-mariadb`, compatible MySQL.                                                                                           |
-| 29/10/2026 | Le serveur est exécuté directement en TypeScript avec **tsx** (pas d'étape de compilation). La compilation sera ajoutée en phase 7 pour Electron.                                                                                                            |
-| 29/10/2026 | Le paquet `@agency/shared` est consommé en source TypeScript, sans étape de build.                                                                                                                                                                           |
-| 29/10/2026 | **n8n** n'est pas encore dans `docker-compose.yml` : il sera ajouté en phase 6, quand il servira.                                                                                                                                                            |
-| 29/10/2026 | L'utilisateur MySQL `agency` a tous les droits **en local** : Prisma Migrate doit pouvoir créer une base temporaire de comparaison.                                                                                                                          |
-| 29/10/2026 | Phase 1 : les sept statuts sont conservés. Le résultat de validation et les tentatives sont des **champs** de la mission, pas de nouveaux statuts.                                                                                                           |
-| 29/10/2026 | Les règles du cycle de vie sont dans `packages/shared` (source unique). Le serveur les applique ; l'interface pourra s'en servir pour l'affichage.                                                                                                           |
-| 29/10/2026 | Colonnes `status` / `room` / `action` en chaînes plutôt qu'en enums Prisma, pour ne pas dupliquer les listes du paquet partagé.                                                                                                                              |
-| 29/10/2026 | Ajout de `pending → blocked` (absent du plan initial) : une mission peut être bloquée avant son démarrage (données manquantes).                                                                                                                              |
-| 29/10/2026 | Refus d'un résultat = `cancelled` + `validationOutcome = rejected` ; demande de modifications = retour en `in_progress`.                                                                                                                                     |
-| 29/10/2026 | Historique protégé par des déclencheurs MySQL (aucune modification ni suppression possible).                                                                                                                                                                 |
-| 29/10/2026 | Contrôle de concurrence optimiste par `version` plutôt que par verrous : simple, et suffisant pour un usage mono-utilisateur.                                                                                                                                |
-| 29/10/2026 | Prisma 7 ne régénère plus le client après une migration : `npm run db:migrate` enchaîne désormais `migrate dev` et `generate`.                                                                                                                               |
-| 29/10/2026 | Phase 2 : libellés alignés sur le cahier des charges (« Mon bureau », « Salle commerciale », « Salle de suivi ») ; identifiants inchangés.                                                                                                                   |
-| 29/10/2026 | Mobilier construit en formes simples dans le code plutôt qu'en modèles 3D téléchargés : aucun fichier lourd, couleurs maîtrisées, aménagement vérifiable par des tests.                                                                                      |
-| 29/10/2026 | Étiquettes en HTML maison plutôt que le composant `Html` de drei, qui perdait une étiquette avec React 19 en mode développement.                                                                                                                             |
-| 29/10/2026 | Caméra : `camera-controls` (fourni avec drei) avec `SCREEN_PAN` (déplacement sur le sol) ; cadrages calculés par `cameraMath.ts`, car son `fitToBox` réaligne la caméra sur les axes et casse la vue isométrique.                                            |
-| 29/10/2026 | Ombres en `PCFShadowMap` (`shadows="percentage"`) : `PCFSoftShadowMap` a été retiré de Three.js.                                                                                                                                                             |
-| 29/10/2026 | Outil de test `window.__agencyProbe`, présent **uniquement en développement**, pour les tests automatisés dans le navigateur.                                                                                                                                |
-| 05/11/2026 | **Identité des agents** : identifiants préfixés `agent-` (schéma partagé + contrainte en base) : un agent ne peut jamais porter l'identité de l'humain (`owner`).                                                                                            |
-| 05/11/2026 | **Clés API** : 256 bits aléatoires, stockées sous forme d'empreinte SHA-256 (un hachage lent n'apporte rien pour une clé aléatoire de cette longueur), comparées en temps constant.                                                                          |
-| 05/11/2026 | **Accès des agents par liste blanche** (lecture seule à cette étape) plutôt que par liste noire : une nouvelle route est fermée aux agents par défaut.                                                                                                       |
-| 05/11/2026 | Toute identification invalide donne **401**, jamais un repli sur l'identité humaine. Les décisions humaines sont aussi vérifiées dans les services (`assertHumanActor`).                                                                                     |
-| 05/11/2026 | Pas de clé étrangère `missions.agent_id → agents.id` : des missions existantes (dont la démo) citent des agents sans identité enregistrée.                                                                                                                   |
-| 05/11/2026 | **Permissions par agent** dans une table (`agent_permissions`) plutôt qu'en JSON : une ligne par permission, aucune par défaut.                                                                                                                              |
-| 05/11/2026 | Routes des agents séparées (`/api/agent/…`) : les routes de l’interface restent inchangées et fermées en écriture aux agents.                                                                                                                                |
-| 05/11/2026 | Règles des productions (étape, statut) appliquées dans la couche API des agents : le scénario de démonstration enregistre des productions déjà validées. Les invariants critiques (décisions, envois, statut des e-mails, étapes) restent dans les services. |
-| 05/11/2026 | **Idempotence** par clé obligatoire et réponse enregistrée (`agent_requests`), hors de la transaction métier : si le serveur s'arrête entre l'écriture et l'enregistrement de la réponse, la clé reste « en cours » (409) jusqu'à sa purge.                  |
-| 05/11/2026 | Doublon détecté sur identifiant YouTube, nom ou adresse de chaîne : `ALREADY_EXISTS` remplace `INVALID_TRANSITION` pour ce cas.                                                                                                                              |
-| 06/11/2026 | **Lot A** : authentification humaine par mot de passe local (scrypt, fourni par Node : aucune dépendance) et session de 12 heures en base, révocable. Toute requête sans identité est refusée.                                                               |
-| 06/11/2026 | Mot de passe défini uniquement depuis le terminal : aucun écran de création de compte, donc personne ne peut l'initialiser à distance.                                                                                                                       |
-| 06/11/2026 | Proxy Vite en `changeOrigin: false` : nécessaire au contrôle de l'origine (constaté lors de l'essai de bout en bout).                                                                                                                                        |
-| 06/11/2026 | **Lot B** : numéro de dossier par compteur annuel verrouillé (fin des collisions : 19 créations simultanées sur 40 échouaient), clés de comparaison uniques en base contre les doublons.                                                                     |
-| 06/11/2026 | Migration sur données existantes : en cas de doublons déjà présents, seul le plus ancien dossier reçoit la clé ; aucune suppression, aucune fusion automatique.                                                                                              |
-| 06/11/2026 | Numérotation annuelle : le premier dossier d'une nouvelle année est P-AAAA-0001 (auparavant, le numéro suivait le nombre total de dossiers).                                                                                                                 |
-| 06/11/2026 | **Lot C** : la clé d'idempotence est écrite dans la transaction métier (première instruction) au lieu d'une transaction séparée : plus d'état « en cours » bloqué après une interruption.                                                                    |
-| 06/11/2026 | Une répétition renvoie l'état actuel de la ressource plutôt qu'une copie de la réponse : plus de dossier complet (données personnelles) conservé dans `agent_requests`.                                                                                      |
-| 06/11/2026 | Arrêts brutaux de Vitest sous Windows : documentés (§ 10 bis), non masqués (pas de nouvel essai automatique des tests), cause encore inconnue.                                                                                                               |
-| 06/11/2026 | Verrou de la ligne du dossier au début de chaque commande (`SELECT … FOR UPDATE`) : des écritures simultanées sur un même dossier passent l'une après l'autre au lieu d'être refusées en 409.                                                                |
-| 06/11/2026 | **Lot D** : routes de l’interface fermées aux agents même en lecture ; lecture par permissions fines et dossier filtré par une seule fonction (`toAgentDossier`). Notes internes et motifs des décisions : autorisation explicite uniquement.                |
-| 06/11/2026 | Les consignes destinées aux agents (nouvelle analyse, modification d’un e-mail) sont transmises seules, sans le reste de la décision humaine.                                                                                                                |
-| 06/11/2026 | **Lot E** : quotas journaliers globaux (10 / 200 / 100) comptés dans la transaction de l’écriture, sur une ligne verrouillée ; un refus annule tout.                                                                                                         |
-| 06/11/2026 | Arrêt d’urgence à deux commandes cumulées : `AGENTS_ENABLED` (.env, non levable depuis l’interface) et interrupteur de l’interface conservé en base. Vérifié à l’entrée de la requête et dans chaque transaction d’écriture.                                 |
+| Date       | Décision                                                                                                                                                                                                                                                                                                                                                  |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 29/10/2026 | **TypeScript 6.0** et non 7.0 : l'outil de lint (typescript-eslint) ne prend pas encore en charge TypeScript 7.                                                                                                                                                                                                                                           |
+| 29/10/2026 | **Prisma 7.10** (dernière version stable) et non 8.0, encore en préversion. Prisma 7 impose un adaptateur de pilote : `@prisma/adapter-mariadb`, compatible MySQL.                                                                                                                                                                                        |
+| 29/10/2026 | Le serveur est exécuté directement en TypeScript avec **tsx** (pas d'étape de compilation). La compilation sera ajoutée en phase 7 pour Electron.                                                                                                                                                                                                         |
+| 29/10/2026 | Le paquet `@agency/shared` est consommé en source TypeScript, sans étape de build.                                                                                                                                                                                                                                                                        |
+| 29/10/2026 | **n8n** n'est pas encore dans `docker-compose.yml` : il sera ajouté en phase 6, quand il servira.                                                                                                                                                                                                                                                         |
+| 29/10/2026 | L'utilisateur MySQL `agency` a tous les droits **en local** : Prisma Migrate doit pouvoir créer une base temporaire de comparaison.                                                                                                                                                                                                                       |
+| 29/10/2026 | Phase 1 : les sept statuts sont conservés. Le résultat de validation et les tentatives sont des **champs** de la mission, pas de nouveaux statuts.                                                                                                                                                                                                        |
+| 29/10/2026 | Les règles du cycle de vie sont dans `packages/shared` (source unique). Le serveur les applique ; l'interface pourra s'en servir pour l'affichage.                                                                                                                                                                                                        |
+| 29/10/2026 | Colonnes `status` / `room` / `action` en chaînes plutôt qu'en enums Prisma, pour ne pas dupliquer les listes du paquet partagé.                                                                                                                                                                                                                           |
+| 29/10/2026 | Ajout de `pending → blocked` (absent du plan initial) : une mission peut être bloquée avant son démarrage (données manquantes).                                                                                                                                                                                                                           |
+| 29/10/2026 | Refus d'un résultat = `cancelled` + `validationOutcome = rejected` ; demande de modifications = retour en `in_progress`.                                                                                                                                                                                                                                  |
+| 29/10/2026 | Historique protégé par des déclencheurs MySQL (aucune modification ni suppression possible).                                                                                                                                                                                                                                                              |
+| 29/10/2026 | Contrôle de concurrence optimiste par `version` plutôt que par verrous : simple, et suffisant pour un usage mono-utilisateur.                                                                                                                                                                                                                             |
+| 29/10/2026 | Prisma 7 ne régénère plus le client après une migration : `npm run db:migrate` enchaîne désormais `migrate dev` et `generate`.                                                                                                                                                                                                                            |
+| 29/10/2026 | Phase 2 : libellés alignés sur le cahier des charges (« Mon bureau », « Salle commerciale », « Salle de suivi ») ; identifiants inchangés.                                                                                                                                                                                                                |
+| 29/10/2026 | Mobilier construit en formes simples dans le code plutôt qu'en modèles 3D téléchargés : aucun fichier lourd, couleurs maîtrisées, aménagement vérifiable par des tests.                                                                                                                                                                                   |
+| 29/10/2026 | Étiquettes en HTML maison plutôt que le composant `Html` de drei, qui perdait une étiquette avec React 19 en mode développement.                                                                                                                                                                                                                          |
+| 29/10/2026 | Caméra : `camera-controls` (fourni avec drei) avec `SCREEN_PAN` (déplacement sur le sol) ; cadrages calculés par `cameraMath.ts`, car son `fitToBox` réaligne la caméra sur les axes et casse la vue isométrique.                                                                                                                                         |
+| 29/10/2026 | Ombres en `PCFShadowMap` (`shadows="percentage"`) : `PCFSoftShadowMap` a été retiré de Three.js.                                                                                                                                                                                                                                                          |
+| 29/10/2026 | Outil de test `window.__agencyProbe`, présent **uniquement en développement**, pour les tests automatisés dans le navigateur.                                                                                                                                                                                                                             |
+| 05/11/2026 | **Identité des agents** : identifiants préfixés `agent-` (schéma partagé + contrainte en base) : un agent ne peut jamais porter l'identité de l'humain (`owner`).                                                                                                                                                                                         |
+| 05/11/2026 | **Clés API** : 256 bits aléatoires, stockées sous forme d'empreinte SHA-256 (un hachage lent n'apporte rien pour une clé aléatoire de cette longueur), comparées en temps constant.                                                                                                                                                                       |
+| 05/11/2026 | **Accès des agents par liste blanche** (lecture seule à cette étape) plutôt que par liste noire : une nouvelle route est fermée aux agents par défaut.                                                                                                                                                                                                    |
+| 05/11/2026 | Toute identification invalide donne **401**, jamais un repli sur l'identité humaine. Les décisions humaines sont aussi vérifiées dans les services (`assertHumanActor`).                                                                                                                                                                                  |
+| 05/11/2026 | Pas de clé étrangère `missions.agent_id → agents.id` : des missions existantes (dont la démo) citent des agents sans identité enregistrée.                                                                                                                                                                                                                |
+| 05/11/2026 | **Permissions par agent** dans une table (`agent_permissions`) plutôt qu'en JSON : une ligne par permission, aucune par défaut.                                                                                                                                                                                                                           |
+| 05/11/2026 | Routes des agents séparées (`/api/agent/…`) : les routes de l’interface restent inchangées et fermées en écriture aux agents.                                                                                                                                                                                                                             |
+| 05/11/2026 | Règles des productions (étape, statut) appliquées dans la couche API des agents : le scénario de démonstration enregistre des productions déjà validées. Les invariants critiques (décisions, envois, statut des e-mails, étapes) restent dans les services.                                                                                              |
+| 05/11/2026 | **Idempotence** par clé obligatoire et réponse enregistrée (`agent_requests`), hors de la transaction métier : si le serveur s'arrête entre l'écriture et l'enregistrement de la réponse, la clé reste « en cours » (409) jusqu'à sa purge.                                                                                                               |
+| 05/11/2026 | Doublon détecté sur identifiant YouTube, nom ou adresse de chaîne : `ALREADY_EXISTS` remplace `INVALID_TRANSITION` pour ce cas.                                                                                                                                                                                                                           |
+| 06/11/2026 | **Lot A** : authentification humaine par mot de passe local (scrypt, fourni par Node : aucune dépendance) et session de 12 heures en base, révocable. Toute requête sans identité est refusée.                                                                                                                                                            |
+| 06/11/2026 | Mot de passe défini uniquement depuis le terminal : aucun écran de création de compte, donc personne ne peut l'initialiser à distance.                                                                                                                                                                                                                    |
+| 06/11/2026 | Proxy Vite en `changeOrigin: false` : nécessaire au contrôle de l'origine (constaté lors de l'essai de bout en bout).                                                                                                                                                                                                                                     |
+| 06/11/2026 | **Lot B** : numéro de dossier par compteur annuel verrouillé (fin des collisions : 19 créations simultanées sur 40 échouaient), clés de comparaison uniques en base contre les doublons.                                                                                                                                                                  |
+| 06/11/2026 | Migration sur données existantes : en cas de doublons déjà présents, seul le plus ancien dossier reçoit la clé ; aucune suppression, aucune fusion automatique.                                                                                                                                                                                           |
+| 06/11/2026 | Numérotation annuelle : le premier dossier d'une nouvelle année est P-AAAA-0001 (auparavant, le numéro suivait le nombre total de dossiers).                                                                                                                                                                                                              |
+| 06/11/2026 | **Lot C** : la clé d'idempotence est écrite dans la transaction métier (première instruction) au lieu d'une transaction séparée : plus d'état « en cours » bloqué après une interruption.                                                                                                                                                                 |
+| 06/11/2026 | Une répétition renvoie l'état actuel de la ressource plutôt qu'une copie de la réponse : plus de dossier complet (données personnelles) conservé dans `agent_requests`.                                                                                                                                                                                   |
+| 06/11/2026 | Arrêts brutaux de Vitest sous Windows : documentés (§ 10 bis), non masqués (pas de nouvel essai automatique des tests), cause encore inconnue.                                                                                                                                                                                                            |
+| 06/11/2026 | Verrou de la ligne du dossier au début de chaque commande (`SELECT … FOR UPDATE`) : des écritures simultanées sur un même dossier passent l'une après l'autre au lieu d'être refusées en 409.                                                                                                                                                             |
+| 06/11/2026 | **Lot D** : routes de l’interface fermées aux agents même en lecture ; lecture par permissions fines et dossier filtré par une seule fonction (`toAgentDossier`). Notes internes et motifs des décisions : autorisation explicite uniquement.                                                                                                             |
+| 06/11/2026 | Les consignes destinées aux agents (nouvelle analyse, modification d’un e-mail) sont transmises seules, sans le reste de la décision humaine.                                                                                                                                                                                                             |
+| 06/11/2026 | **Lot E** : quotas journaliers globaux (10 / 200 / 100) comptés dans la transaction de l’écriture, sur une ligne verrouillée ; un refus annule tout.                                                                                                                                                                                                      |
+| 06/11/2026 | Arrêt d’urgence à deux commandes cumulées : `AGENTS_ENABLED` (.env, non levable depuis l’interface) et interrupteur de l’interface conservé en base. Vérifié à l’entrée de la requête et dans chaque transaction d’écriture.                                                                                                                              |
+| 06/11/2026 | **Accès du VPS par Tailscale** : deuxième écoute sur l'adresse Tailscale du PC, filtrée à la connexion (VPS seul) puis par route (routes des agents seulement), en plus de 127.0.0.1 inchangée. Jamais 0.0.0.0.                                                                                                                                           |
+| 06/11/2026 | **Phase 1 des agents** : démarrer une mission libre l'attribue à l'agent (atomique) ; un agent ne voit que ses missions et les libres de sa salle ; mission interrompue → `blocked` (`INTERRUPTED`), jamais remise en attente automatiquement. Aucune migration : `agent_id` reste sans clé étrangère, l'existence de l'agent est vérifiée à la création. |
+| 06/11/2026 | Un agent ne rattache un résultat (analyse, production, activité) qu'à **sa** mission **en cours** ; verrou de la mission partagé entre ces écritures et la récupération des missions interrompues. Aucune migration.                                                                                                                                      |

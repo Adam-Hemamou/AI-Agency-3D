@@ -1,6 +1,7 @@
 import mariadb from 'mariadb';
 import { inject } from 'vitest';
-import { createPrismaClient } from '../db/prisma.ts';
+import type { RoomId } from '@agency/shared';
+import { createPrismaClient, type AppPrismaClient } from '../db/prisma.ts';
 
 /** URL de la base de test fournie par globalSetup. */
 export function testDatabaseUrl(): string {
@@ -53,4 +54,17 @@ export async function resetDatabase(): Promise<void> {
   } finally {
     await connection.end();
   }
+}
+
+/**
+ * Crée un agent directement en base de test (sans clé ni permission), pour les tests de services :
+ * une mission ne peut être attribuée qu'à un agent existant, et un agent n'agit que dans sa salle.
+ */
+export async function createTestAgent(
+  prisma: AppPrismaClient,
+  id: string,
+  room: RoomId | null = null,
+): Promise<void> {
+  const now = new Date();
+  await prisma.agent.create({ data: { id, name: id, room, createdAt: now, updatedAt: now } });
 }

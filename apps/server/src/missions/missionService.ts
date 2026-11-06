@@ -1,6 +1,7 @@
 import {
   ERROR_CODES,
   VALIDATION_TRANSITIONS,
+  checkAgentMissionAccess,
   checkMissionAction,
   isAgentMissionAction,
   checkValidationDecision,
@@ -8,6 +9,7 @@ import {
   getAvailableDecisions,
   type ActionCheck,
   type ActorType,
+  type AgentMissionScope,
   type CreateMissionInput,
   type Mission,
   type MissionCommandResponse,
@@ -51,6 +53,7 @@ export interface Actor {
 /** Champs dont l'historique conserve l'ancienne et la nouvelle valeur. */
 const TRACKED_FIELDS = [
   'status',
+  'agentId',
   'attemptCount',
   'output',
   'validationOutcome',
@@ -129,11 +132,64 @@ function concurrentModification(id: string): AppError {
   );
 }
 
+/** Auteur des actions automatiques (récupération des traitements interrompus). */
+const SYSTEM_ACTOR: Actor = { type: 'system', id: null };
+
 /** Action réservée à l'humain (message d'erreur FORBIDDEN_ACTOR). */
 const VALIDATION_DECISION = 'rendre une décision de validation';
 
 function missionNotFound(id: string): AppError {
   return AppError.notFound(`Mission introuvable : ${id}`);
+}
+
+function forbiddenActor(message: string): AppError {
+  return new AppError(ERROR_CODES.FORBIDDEN_ACTOR, message, 403);
+}
+
+/** Traduction en base de canAgentSeeMission (packages/shared) : les deux doivent rester identiques. */
+export function visibilityWhere(agent: AgentMissionScope): Prisma.MissionWhereInput {
+  if (agent.room === null) return { agentId: agent.id };
+  return { room: agent.room, OR: [{ agentId: agent.id }, { agentId: null }] };
+}
+
+/** Code enregistré sur une mission bloquée par la récupération des traitements interrompus. */
+export const INTERRUPTED_ERROR_CODE = 'INTERRUPTED';
+
+/** Mission bloquée par la récupération, avec ce qu'elle avait déjà produit. */
+export interface RecoveredMission {
+  missionId: string;
+  agentId: string | null;
+  effects: MissionEffects;
+}
+
+/** Ce qu'une mission a déjà laissé depuis son démarrage (informe la décision humaine). */
+export interface MissionEffects {
+  analyses: number;
+  productions: number;
+  decisions: number;
+  events: number;
+  /** Un résultat (output) a déjà été transmis. */
+  output: boolean;
+}
+
+export function hasEffects(effects: MissionEffects): boolean {
+  return (
+    effects.output ||
+    effects.analyses + effects.productions + effects.decisions + effects.events > 0
+  );
+}
+
+function describeEffects(effects: MissionEffects): string {
+  const parts = [
+    effects.analyses && `${effects.analyses} analyse(s)`,
+    effects.productions && `${effects.productions} production(s)`,
+    effects.decisions && `${effects.decisions} décision(s)`,
+    effects.events && `${effects.events} activité(s) du dossier`,
+    effects.output && 'un résultat transmis',
+  ].filter(Boolean);
+  return parts.length === 0
+    ? 'Aucun effet enregistré.'
+    : `Effets déjà enregistrés : ${parts.join(', ')}. Vérifiez-les avant de débloquer.`;
 }
 
 /**
@@ -212,6 +268,14 @@ export function createMissionService(
       });
       if (!prospect) throw AppError.notFound(`Prospect introuvable : ${input.prospectId}`);
     }
+    // Pas de clé étrangère (missions historiques) : l'existence de l'agent est vérifiée ici.
+    if (input.agentId !== null) {
+      const agent = await tx.agent.findUnique({
+        where: { id: input.agentId },
+        select: { id: true },
+      });
+      if (!agent) throw AppError.validation(`Agent inconnu : ${input.agentId}`);
+    }
     const now = clock();
     const mission = await tx.mission.create({
       data: {
@@ -256,16 +320,35 @@ export function createMissionService(
   }
 
   /** Action de cycle de vie : démarrer, mettre en pause, bloquer, terminer… */
-  function applyActionIn(tx: Db, id: string, request: MissionTransitionRequest, actor: Actor) {
+  /** Identité et salle d'un agent, lues en base (jamais dans la requête). */
+  async function agentScopeIn(tx: Db, agentId: string | null): Promise<AgentMissionScope> {
+    const row = agentId
+      ? await tx.agent.findUnique({ where: { id: agentId }, select: { id: true, room: true } })
+      : null;
+    if (!row) throw forbiddenActor(`Agent inconnu : ${agentId ?? '(sans identifiant)'}`);
+    return { id: row.id, room: row.room };
+  }
+
+  async function applyActionIn(
+    tx: Db,
+    id: string,
+    request: MissionTransitionRequest,
+    actor: Actor,
+  ): Promise<MissionCommandResponse> {
     // Annuler ou débloquer une mission reste une décision humaine (ou du système).
     if (actor.type === 'agent' && !isAgentMissionAction(request.action)) {
-      throw new AppError(
-        ERROR_CODES.FORBIDDEN_ACTOR,
+      throw forbiddenActor(
         `Un agent ne peut pas effectuer l'action « ${request.action} » sur une mission`,
-        403,
       );
     }
+    const agent = actor.type === 'agent' ? await agentScopeIn(tx, actor.id) : null;
     return mutateIn(tx, id, request.expectedVersion, actor, (current, now) => {
+      // Contrôlé sur la mission lue DANS la transaction : la mise à jour, conditionnée à sa
+      // version, échoue si une autre requête l'a modifiée (ou attribuée) entre-temps.
+      if (agent) {
+        const access = checkAgentMissionAccess(current, agent, request.action);
+        if (!access.allowed) throw forbiddenActor(access.reason);
+      }
       const check = checkMissionAction(toState(current), request.action);
       if (!check.allowed) throw refusal(check, current, request.action);
 
@@ -274,6 +357,8 @@ export function createMissionService(
         case 'start':
           patch.attemptCount = current.attemptCount + 1;
           patch.startedAt = current.startedAt ?? now;
+          // Un agent qui démarre une mission libre la prend : elle n'appartient plus qu'à lui.
+          if (agent && current.agentId === null) patch.agentId = agent.id;
           break;
         case 'submit_for_validation':
           if (request.output !== undefined) patch.output = request.output;
@@ -342,13 +427,23 @@ export function createMissionService(
       return toMissionDto(row);
     },
 
-    async list(query: MissionListQuery): Promise<MissionListResponse> {
-      const where: Prisma.MissionWhereInput = {
+    /**
+     * Liste filtrée. `visibleTo` : limite aux missions que cet agent peut voir (canAgentSeeMission),
+     * appliqué en base pour que le total et la pagination restent exacts.
+     */
+    async list(
+      query: MissionListQuery,
+      { visibleTo }: { visibleTo?: AgentMissionScope } = {},
+    ): Promise<MissionListResponse> {
+      const filters: Prisma.MissionWhereInput = {
         ...(query.status && { status: { in: query.status } }),
         ...(query.room && { room: { in: query.room } }),
         ...(query.type && { type: { in: query.type } }),
         ...(query.prospectId && { prospectId: query.prospectId }),
       };
+      const where: Prisma.MissionWhereInput = visibleTo
+        ? { AND: [filters, visibilityWhere(visibleTo)] }
+        : filters;
       const orderBy: Prisma.MissionOrderByWithRelationInput[] =
         query.sort === 'priority'
           ? [{ priority: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }]
@@ -409,6 +504,90 @@ export function createMissionService(
     async decide(id: string, request: ValidationDecisionRequest, actor: Actor) {
       assertHumanActor(actor, VALIDATION_DECISION);
       return prisma.$transaction((tx) => decideIn(tx, id, request, actor));
+    },
+
+    /**
+     * Récupération des traitements interrompus : une mission « en cours » sans AUCUNE activité
+     * depuis staleAfterMs passe en « bloquée », au nom du système, avec le code INTERRUPTED.
+     *
+     * - Activité = la mission elle-même (toute transition) OU un enregistrement qui la cite
+     *   (analyse, production, décision, activité du dossier). Un agent qui avance sur un long
+     *   traitement peut donc signaler qu'il est vivant en ajoutant une activité liée à la mission.
+     * - Jamais de retour automatique « en attente » : l'utilisateur décide (débloquer ou annuler).
+     *   Le motif indique ce que la mission a déjà produit, pour éviter de refaire un travail.
+     * - Chaque mission est revérifiée dans sa transaction, et la mise à jour est conditionnée à sa
+     *   version : si l'agent la fait évoluer au même moment, c'est son action qui l'emporte.
+     */
+    async recoverStale({ staleAfterMs }: { staleAfterMs: number }): Promise<RecoveredMission[]> {
+      const cutoff = new Date(clock().getTime() - staleAfterMs);
+      const candidates = await prisma.mission.findMany({
+        where: { status: 'in_progress', updatedAt: { lt: cutoff } },
+        select: { id: true },
+        orderBy: { updatedAt: 'asc' },
+        take: 100,
+      });
+      const minutes = Math.round(staleAfterMs / 60_000);
+      const recovered: RecoveredMission[] = [];
+      for (const { id } of candidates) {
+        try {
+          const result = await prisma.$transaction(async (tx) => {
+            // PREMIÈRE instruction : verrou de la mission, avant toute lecture. Une écriture d'agent
+            // qui la cite (verrou partagé) passe donc entièrement avant ou entièrement après :
+            // les comptages ci-dessous voient tout ce qui a été enregistré avant ce verrou.
+            await tx.$queryRaw`SELECT id FROM missions WHERE id = ${id} FOR UPDATE`;
+            const current = await tx.mission.findUnique({ where: { id } });
+            if (!current || current.status !== 'in_progress' || current.updatedAt >= cutoff) {
+              return null;
+            }
+            const linked = { missionId: id };
+            const recent = { ...linked, createdAt: { gte: cutoff } };
+            const [recentAnalyses, recentProductions, recentDecisions, recentEvents] =
+              await Promise.all([
+                tx.prospectAnalysis.count({ where: recent }),
+                tx.prospectProduction.count({
+                  where: {
+                    ...linked,
+                    OR: [{ createdAt: { gte: cutoff } }, { updatedAt: { gte: cutoff } }],
+                  },
+                }),
+                tx.prospectDecision.count({ where: recent }),
+                tx.prospectEvent.count({ where: recent }),
+              ]);
+            // Toujours en cours de traitement : quelque chose a été enregistré récemment.
+            if (recentAnalyses + recentProductions + recentDecisions + recentEvents > 0)
+              return null;
+
+            const since = { ...linked, createdAt: { gte: current.startedAt ?? current.createdAt } };
+            const effects: MissionEffects = {
+              analyses: await tx.prospectAnalysis.count({ where: since }),
+              productions: await tx.prospectProduction.count({ where: since }),
+              decisions: await tx.prospectDecision.count({ where: since }),
+              events: await tx.prospectEvent.count({ where: since }),
+              output: current.output !== null,
+            };
+            const message =
+              `Traitement interrompu : aucune activité depuis plus de ${minutes} min. ` +
+              describeEffects(effects);
+            await mutateIn(tx, id, current.version, SYSTEM_ACTOR, () => ({
+              action: 'block',
+              patch: {
+                status: 'blocked',
+                lastErrorCode: INTERRUPTED_ERROR_CODE,
+                lastErrorMessage: message,
+              },
+              reason: message,
+            }));
+            return { missionId: id, agentId: current.agentId, effects };
+          });
+          if (result) recovered.push(result);
+        } catch (error) {
+          // Modifiée entre-temps (l'agent a repris la main) : la mission n'est pas touchée.
+          if (error instanceof AppError && error.code === ERROR_CODES.CONCURRENT_MODIFICATION)
+            continue;
+          throw error;
+        }
+      }
+      return recovered;
     },
   };
 }

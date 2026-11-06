@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import type { CreateProspectRequest } from '@agency/shared';
 import { AppError } from '../errors/AppError.ts';
 import { createMissionService, type Actor } from '../missions/missionService.ts';
-import { createTestPrisma, resetDatabase } from '../test/testDb.ts';
+import { createTestAgent, createTestPrisma, resetDatabase } from '../test/testDb.ts';
 import { createProspectService } from './prospectService.ts';
 
 const prisma = createTestPrisma();
@@ -38,6 +38,7 @@ async function settle(promises: Promise<{ prospect: { reference: string } }>[]) 
 beforeEach(async () => {
   now = new Date('2026-11-06T10:00:00.000Z');
   await resetDatabase();
+  await createTestAgent(prisma, agent.id!);
 });
 
 afterAll(async () => {
@@ -120,6 +121,7 @@ describe('doublons lors de créations simultanées', () => {
   ])('%s, au milieu d’autres créations : un seul dossier', async (_label, variants) => {
     for (let round = 0; round < 3; round++) {
       await resetDatabase();
+      await createTestAgent(prisma, agent.id!);
       const others = Array.from({ length: 5 }, (_, k) =>
         service.createProspect(prospect({ channelHandle: `@autre-${k}` }), agent),
       );
