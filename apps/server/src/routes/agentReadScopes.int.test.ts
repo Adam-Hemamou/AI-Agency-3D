@@ -22,7 +22,7 @@ import { createMissionService } from '../missions/missionService.ts';
 import { createProspectService } from '../prospects/prospectService.ts';
 import { ownerClient, type OwnerClient } from '../test/ownerSession.ts';
 import { testAgentLimits } from '../test/agentLimits.ts';
-import { createTestPrisma, resetDatabase } from '../test/testDb.ts';
+import { createTestAgent, createTestPrisma, resetDatabase } from '../test/testDb.ts';
 
 /**
  * Lot D : chaque rôle ne lit que ce dont il a besoin, par TOUTES les routes possibles.
@@ -67,6 +67,9 @@ function open(d: ProspectDossier, room: RoomId) {
 /** Dossier complet, construit par les vrais services, avec des décisions et une note humaines. */
 async function buildDossier(): Promise<ProspectDossier> {
   const agent = agentActor('agent-pipeline');
+  await createTestAgent(prisma, agent.id!);
+  const reviewer = agentActor('agent-relecteur');
+  await createTestAgent(prisma, reviewer.id!, 'email_review');
   let d = await prospects.createProspect(
     {
       creatorName: 'Léa',
@@ -102,8 +105,12 @@ async function buildDossier(): Promise<ProspectDossier> {
   );
   d = await prospects.advanceStage(id, { to: 'review' }, agent);
   const review = open(d, 'director');
-  await missions.applyAction(review.id, { action: 'start' }, agent);
-  await missions.applyAction(review.id, { action: 'submit_for_validation' }, agent);
+  await missions.applyAction(review.id, { action: 'start' }, { type: 'system', id: null });
+  await missions.applyAction(
+    review.id,
+    { action: 'submit_for_validation' },
+    { type: 'system', id: null },
+  );
   await prospects.decideProspect(
     id,
     { missionId: review.id, decision: 'approve', reason: SECRETS.approval },
@@ -140,7 +147,7 @@ async function buildDossier(): Promise<ProspectDossier> {
   );
   d = await prospects.advanceStage(id, { to: 'email_review' }, agent);
   const mailMission = open(d, 'email_review');
-  await missions.applyAction(mailMission.id, { action: 'start' }, agent);
+  await missions.applyAction(mailMission.id, { action: 'start' }, reviewer);
   d = await prospects.addProduction(
     id,
     {
@@ -149,9 +156,9 @@ async function buildDossier(): Promise<ProspectDossier> {
       missionId: mailMission.id,
       content: { to: CONTACT, subject: 'Votre chaîne en anglais', body: 'Bonjour Léa' },
     },
-    agent,
+    reviewer,
   );
-  await missions.applyAction(mailMission.id, { action: 'submit_for_validation' }, agent);
+  await missions.applyAction(mailMission.id, { action: 'submit_for_validation' }, reviewer);
   const email = d.productions.find((p) => p.kind === 'email')!;
   await prospects.decideEmail(
     id,
@@ -230,14 +237,16 @@ describe.each(AGENT_ROLES)('rôle %s', (role) => {
     }
   });
 
-  it('ne lit pas l’historique des missions (motifs des validations)', async () => {
+  it('ne lit ni la mission de Mon bureau ni son historique (motifs des validations)', async () => {
     const mission = dossier.missions.find((m) => m.room === 'director')!;
     const res = await request(app)
       .get(`/api/agent/missions/${mission.id}`)
       .set(asRole(role))
-      .expect(200);
+      .expect(403);
     expect(JSON.stringify(res.body)).not.toContain(SECRETS.approval);
-    expect(res.body).not.toHaveProperty('events');
+    const list = await request(app).get('/api/agent/missions').set(asRole(role)).expect(200);
+    expect(JSON.stringify(list.body)).not.toContain(SECRETS.approval);
+    expect(JSON.stringify(list.body)).not.toContain(mission.id);
   });
 });
 

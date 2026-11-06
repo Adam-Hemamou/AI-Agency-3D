@@ -10,7 +10,8 @@ import { DEMO_SERVER_PORT, isDemoDataset, resolveDemoDatabaseUrl } from './confi
 import { loadConfig, type AppConfig } from './config/env.ts';
 import { createDatabaseProbe, createPrismaClient } from './db/prisma.ts';
 import { logger } from './lib/logger.ts';
-import { createMissionService } from './missions/missionService.ts';
+import { createMissionService, hasEffects } from './missions/missionService.ts';
+import { startStaleRecovery } from './missions/staleRecovery.ts';
 import { createShutdown } from './network/shutdown.ts';
 import { closeServers, SHUTDOWN_TIMEOUT_MS, startTailnetListener } from './network/tailnet.ts';
 import { createProspectService } from './prospects/prospectService.ts';
@@ -116,14 +117,32 @@ if (config.TAILSCALE_BIND_ADDRESS) {
   );
 }
 
+/**
+ * Missions interrompues (« en cours » sans activité depuis MISSION_STALE_MINUTES) : passées en
+ * « bloquée », jamais remises en attente. Désactivé en démonstration (dates fictives passées).
+ */
+const staleRecovery = demoMode
+  ? null
+  : startStaleRecovery({
+      recover: () => missions.recoverStale({ staleAfterMs: config.MISSION_STALE_MINUTES * 60_000 }),
+      onRecovered: (m) =>
+        logger.warn(
+          `Mission ${m.missionId} bloquée : traitement interrompu (agent ${m.agentId ?? 'aucun'}, ` +
+            `${hasEffects(m.effects) ? 'effets déjà enregistrés, à vérifier' : 'aucun effet'}).`,
+        ),
+      onError: (error) => logger.error('Récupération des missions interrompues : échec', error),
+    });
+
 const shutdown = createShutdown({
   // Requêtes en cours : SHUTDOWN_TIMEOUT_MS (5 s) au plus, puis connexions coupées.
-  closeServers: () =>
-    closeServers([server, tailnetServer], {
+  closeServers: () => {
+    staleRecovery?.stop();
+    return closeServers([server, tailnetServer], {
       timeoutMs: SHUTDOWN_TIMEOUT_MS,
       onForced: () =>
         logger.warn('Arrêt : requêtes encore en cours après 5 s, connexions coupées.'),
-    }),
+    });
+  },
   disconnect: () => prisma.$disconnect(),
   exit: (code) => process.exit(code),
   log: logger,

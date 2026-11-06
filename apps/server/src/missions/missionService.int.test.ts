@@ -8,7 +8,7 @@ import {
 } from '@agency/shared';
 import type { AppPrismaClient } from '../db/prisma.ts';
 import { AppError } from '../errors/AppError.ts';
-import { createTestPrisma, resetDatabase } from '../test/testDb.ts';
+import { createTestAgent, createTestPrisma, resetDatabase } from '../test/testDb.ts';
 import { createMissionService, type Actor } from './missionService.ts';
 
 const prisma = createTestPrisma();
@@ -18,10 +18,12 @@ const user: Actor = { type: 'user', id: 'owner' };
 const agent: Actor = { type: 'agent', id: 'agent-analyste' };
 const system: Actor = { type: 'system', id: null };
 
+/** Par défaut, la mission est attribuée à l'agent des tests (qui peut donc la faire évoluer). */
 async function create(overrides: Partial<CreateMissionRequest> = {}, actor: Actor = user) {
   const input = createMissionRequestSchema.parse({
     type: 'search_creators',
     room: 'prospecting',
+    agentId: agent.id,
     ...overrides,
   });
   return (await service.create(input, actor)).mission;
@@ -49,6 +51,8 @@ async function expectAppError(promise: Promise<unknown>, code: string) {
 
 beforeEach(async () => {
   await resetDatabase();
+  // Sans salle : il agit sur les missions qui lui sont attribuées, quelle que soit leur salle.
+  await createTestAgent(prisma, agent.id!);
 });
 
 afterAll(async () => {
@@ -57,7 +61,7 @@ afterAll(async () => {
 
 describe('création et lecture', () => {
   it('crée une mission en attente avec les valeurs par défaut', async () => {
-    const mission = await create({ input: { query: 'cuisine', languages: ['fr'] } });
+    const mission = await create({ input: { query: 'cuisine', languages: ['fr'] }, agentId: null });
     expect(mission).toMatchObject({
       type: 'search_creators',
       room: 'prospecting',
@@ -78,7 +82,7 @@ describe('création et lecture', () => {
   });
 
   it('relit la mission créée', async () => {
-    const created = await create({ priority: 5, agentId: 'agent-1' });
+    const created = await create({ priority: 5, agentId: 'agent-analyste' });
     expect(await service.get(created.id)).toEqual(created);
   });
 
@@ -113,7 +117,8 @@ describe('recherche et filtres', () => {
   beforeEach(async () => {
     const a = await create({ type: 'search_creators', room: 'prospecting', priority: 2 });
     await create({ type: 'score', room: 'analysis', priority: 5 });
-    const c = await create({ type: 'score', room: 'analysis', priority: 1 });
+    // Attribuée à l'agent : il ne peut bloquer qu'une mission qui est la sienne.
+    const c = await create({ type: 'score', room: 'analysis', priority: 1, agentId: agent.id });
     await create({ type: 'write_email', room: 'copywriting', priority: 3 });
     await act(a.id, { action: 'start' });
     await act(c.id, { action: 'block', reason: 'données manquantes' });
@@ -182,7 +187,7 @@ describe('démarrage, pause et reprise', () => {
   });
 
   it('refuse de reprendre une mission qui n’est pas en pause', async () => {
-    const { id } = await create();
+    const { id } = await create({ agentId: agent.id });
     const error = await expectAppError(act(id, { action: 'resume' }), 'INVALID_TRANSITION');
     expect(error.httpStatus).toBe(409);
     expect(error.details).toMatchObject({
@@ -193,7 +198,7 @@ describe('démarrage, pause et reprise', () => {
   });
 
   it('refuse de mettre en pause une mission en attente', async () => {
-    const { id } = await create();
+    const { id } = await create({ agentId: agent.id });
     await expectAppError(act(id, { action: 'pause' }), 'INVALID_TRANSITION');
   });
 });
@@ -208,7 +213,7 @@ describe('fin de mission sans validation', () => {
   });
 
   it('refuse de terminer une mission qui n’a pas démarré', async () => {
-    const { id } = await create();
+    const { id } = await create({ agentId: agent.id });
     await expectAppError(act(id, { action: 'complete' }), 'INVALID_TRANSITION');
   });
 
@@ -229,6 +234,7 @@ describe('validation humaine obligatoire', () => {
       type: 'review_prospect',
       room: 'director',
       requiresValidation: true,
+      agentId: agent.id,
     });
     await act(id, { action: 'start' });
     await act(id, { action: 'submit_for_validation', output: { score: 82 } });

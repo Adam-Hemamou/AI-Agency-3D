@@ -37,6 +37,16 @@ export const envSchema = z
       .string({ error: 'DATABASE_URL est obligatoire' })
       .startsWith('mysql://', { error: 'DATABASE_URL doit commencer par mysql://' }),
     /**
+     * Une mission « en cours » sans aucune activité depuis ce délai (minutes) est considérée comme
+     * interrompue et passe en « bloquée » (jamais en « en attente »). De 5 min à 7 jours.
+     */
+    MISSION_STALE_MINUTES: z.coerce
+      .number({ error: 'MISSION_STALE_MINUTES doit être un nombre de minutes' })
+      .int({ error: 'MISSION_STALE_MINUTES doit être un nombre entier de minutes' })
+      .min(5, { error: 'MISSION_STALE_MINUTES : 5 minutes au minimum' })
+      .max(10_080, { error: 'MISSION_STALE_MINUTES : 7 jours (10080 minutes) au maximum' })
+      .default(60),
+    /**
      * Deuxième écoute, EN PLUS de 127.0.0.1 : l'adresse Tailscale de ce PC (100.64.0.0/10).
      * Vide par défaut : API locale uniquement. 0.0.0.0 et toute adresse hors Tailscale sont refusées.
      */

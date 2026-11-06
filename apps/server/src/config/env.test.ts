@@ -124,3 +124,21 @@ describe('écoute Tailscale (.env)', () => {
     ]);
   });
 });
+
+describe('délai des missions interrompues (.env)', () => {
+  it('60 minutes par défaut', () => {
+    expect(parseEnv({ DATABASE_URL: DB }).MISSION_STALE_MINUTES).toBe(60);
+  });
+
+  it('accepte une valeur configurée', () => {
+    expect(parseEnv({ DATABASE_URL: DB, MISSION_STALE_MINUTES: '180' }).MISSION_STALE_MINUTES).toBe(
+      180,
+    );
+  });
+
+  it.each(['0', '4', '10081', '30.5', 'une heure', '-60'])('refuse « %s »', (value) => {
+    expect(() => parseEnv({ DATABASE_URL: DB, MISSION_STALE_MINUTES: value })).toThrow(
+      /MISSION_STALE_MINUTES/,
+    );
+  });
+});

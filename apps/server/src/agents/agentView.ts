@@ -1,5 +1,7 @@
 import {
   PRODUCTION_READ_PERMISSION,
+  canAgentSeeMission,
+  type AgentMissionScope,
   type AgentDossier,
   type AgentHiddenSection,
   type AgentInstruction,
@@ -82,7 +84,16 @@ function stripContactChanges(event: ProspectEvent): ProspectEvent {
   };
 }
 
-export function toAgentDossier(dossier: ProspectDossier, permissions: Permissions): AgentDossier {
+export interface AgentViewer {
+  /** L'agent qui lit : seules les missions qu'il peut voir (canAgentSeeMission) sont gardées. */
+  missionsOf: AgentMissionScope;
+}
+
+export function toAgentDossier(
+  dossier: ProspectDossier,
+  permissions: Permissions,
+  viewer: AgentViewer,
+): AgentDossier {
   const can = (p: AgentPermission) => permissions.has(p);
   const hidden: AgentHiddenSection[] = [];
   const p = dossier.prospect;
@@ -149,7 +160,8 @@ export function toAgentDossier(dossier: ProspectDossier, permissions: Permission
 
   const view: AgentDossier = {
     prospect,
-    missions: dossier.missions,
+    // Jamais les missions d'un autre agent (ni, pour un agent sans salle, les missions libres).
+    missions: dossier.missions.filter((m) => canAgentSeeMission(m, viewer.missionsOf)),
     productions: dossier.productions.filter((x) => can(PRODUCTION_READ_PERMISSION[x.kind])),
     instructions,
     events: dossier.events

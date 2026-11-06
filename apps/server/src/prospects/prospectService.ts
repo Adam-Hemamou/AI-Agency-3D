@@ -7,6 +7,7 @@ import {
   RELATIONSHIP_STATUS_LABELS,
   ROOM_LABELS,
   canAgentMoveToStage,
+  canAgentSeeMission,
   canMoveToStage,
   canSendFollowup,
   channelHandleKey,
@@ -425,15 +426,62 @@ export function createProspectService({
     return formatReference(year, number);
   }
 
-  /** Une mission citée par une analyse, une production ou une activité concerne bien ce dossier. */
-  async function checkMissionBelongs(tx: Db, row: ProspectRow, missionId: string | null) {
+  /**
+   * Mission citée par une analyse, une production ou une activité.
+   * - Pour tous : elle concerne bien ce dossier.
+   * - Pour un agent, en plus : elle lui est attribuée, il peut la voir (sa salle) et elle est
+   *   « en cours ». La mission est lue avec un verrou partagé (FOR SHARE), qui renvoie son dernier
+   *   état enregistré : l'écriture et la récupération des missions interrompues (qui verrouille la
+   *   mission en premier) passent l'une après l'autre. Un effet n'est donc jamais enregistré sur une
+   *   mission que la récupération vient de bloquer, ni ignoré par elle.
+   * L'utilisateur et le système gardent la seule vérification du dossier.
+   */
+  async function checkMissionBelongs(
+    tx: Db,
+    row: ProspectRow,
+    missionId: string | null,
+    actor: Actor,
+  ) {
     if (missionId === null) return;
-    const mission = await tx.mission.findUnique({
-      where: { id: missionId },
-      select: { prospectId: true },
-    });
-    if (!mission || mission.prospectId !== row.id) {
+    if (actor.type !== 'agent') {
+      const mission = await tx.mission.findUnique({
+        where: { id: missionId },
+        select: { prospectId: true },
+      });
+      if (!mission || mission.prospectId !== row.id) {
+        throw AppError.validation(`Cette mission ne concerne pas le dossier ${row.reference}`);
+      }
+      return;
+    }
+
+    const [mission] = await tx.$queryRaw<
+      { prospect_id: string | null; agent_id: string | null; room: string; status: string }[]
+    >`SELECT prospect_id, agent_id, room, status FROM missions WHERE id = ${missionId} FOR SHARE`;
+    if (!mission || mission.prospect_id !== row.id) {
       throw AppError.validation(`Cette mission ne concerne pas le dossier ${row.reference}`);
+    }
+    const agent = actor.id
+      ? await tx.agent.findUnique({ where: { id: actor.id }, select: { id: true, room: true } })
+      : null;
+    if (!agent) throw forbidden(`Agent inconnu : ${actor.id ?? '(sans identifiant)'}`);
+    if (mission.agent_id === null) {
+      throw forbidden(
+        'Cette mission n’est attribuée à aucun agent : démarrez-la (action « start ») avant d’y rattacher un résultat',
+      );
+    }
+    if (mission.agent_id !== agent.id) {
+      throw forbidden(`Cette mission est attribuée à un autre agent (${mission.agent_id})`);
+    }
+    if (!canAgentSeeMission({ agentId: mission.agent_id, room: mission.room }, agent)) {
+      throw forbidden(`Cette mission appartient à une autre salle (${mission.room})`);
+    }
+    if (mission.status !== 'in_progress') {
+      throw new AppError(
+        ERROR_CODES.INVALID_TRANSITION,
+        `Un résultat ne peut être rattaché qu’à une mission en cours (statut actuel : « ${mission.status} »)`,
+        409,
+        { currentStatus: mission.status },
+      );
     }
   }
 
@@ -546,7 +594,7 @@ export function createProspectService({
         `Seul l'utilisateur humain peut donner le statut « ${input.status} » à un e-mail`,
       );
     }
-    await checkMissionBelongs(tx, row, input.missionId);
+    await checkMissionBelongs(tx, row, input.missionId, actor);
     const last = await tx.prospectProduction.findFirst({
       where: { prospectId: row.id, kind: input.kind },
       orderBy: { version: 'desc' },
@@ -840,7 +888,7 @@ export function createProspectService({
         id,
         async (tx, row) => {
           options.guard?.(row);
-          await checkMissionBelongs(tx, row, input.missionId);
+          await checkMissionBelongs(tx, row, input.missionId, actor);
           const last = await tx.prospectAnalysis.findFirst({
             where: { prospectId: row.id },
             orderBy: { version: 'desc' },
@@ -1023,7 +1071,7 @@ export function createProspectService({
       return command(
         id,
         async (tx, row) => {
-          await checkMissionBelongs(tx, row, request.missionId ?? null);
+          await checkMissionBelongs(tx, row, request.missionId ?? null, actor);
           await update(tx, row, {});
           await addEvent(tx, row.id, actor, {
             type: 'agent_activity',

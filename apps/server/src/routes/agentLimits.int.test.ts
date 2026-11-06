@@ -20,7 +20,7 @@ import { createDatabaseProbe } from '../db/prisma.ts';
 import { createMissionService } from '../missions/missionService.ts';
 import { createProspectService } from '../prospects/prospectService.ts';
 import { ownerClient, type OwnerClient } from '../test/ownerSession.ts';
-import { createTestPrisma, resetDatabase } from '../test/testDb.ts';
+import { createTestAgent, createTestPrisma, resetDatabase } from '../test/testDb.ts';
 
 /**
  * Lot E : quotas journaliers GLOBAUX (valeurs réelles : 10 / 200 / 100), débit par agent,
@@ -28,6 +28,7 @@ import { createTestPrisma, resetDatabase } from '../test/testDb.ts';
  */
 
 const prisma = createTestPrisma();
+const SYSTEM_ACTOR = { type: 'system', id: null } as const;
 let now = new Date('2026-11-06T10:00:00.000Z'); // 11 h à Paris
 const clock = () => now;
 const missions = createMissionService(prisma);
@@ -224,6 +225,7 @@ describe('quota global de création de prospects (10 par jour)', () => {
   });
 
   it('les opérations de l’utilisateur et du système ne sont pas comptées', async () => {
+    await createTestAgent(prisma, 'agent-service');
     for (let i = 0; i < 12; i++) {
       await prospects.createProspect(prospectBody(`@humain${i}`), agentActor('agent-service'));
     }
@@ -255,8 +257,9 @@ describe('quotas globaux d’enrichissement (200) et de production (100)', () =>
     await prospects.advanceStage(d.prospect.id, { to: 'analysis' }, agent);
     d = await prospects.advanceStage(d.prospect.id, { to: 'review' }, agent);
     const review = d.missions.find((m) => m.room === 'director')!;
-    await missions.applyAction(review.id, { action: 'start' }, agent);
-    await missions.applyAction(review.id, { action: 'submit_for_validation' }, agent);
+    // Mission de Mon bureau : lancée par le système, comme dans le parcours réel.
+    await missions.applyAction(review.id, { action: 'start' }, SYSTEM_ACTOR);
+    await missions.applyAction(review.id, { action: 'submit_for_validation' }, SYSTEM_ACTOR);
     await prospects.decideProspect(
       d.prospect.id,
       { missionId: review.id, decision: 'approve' },

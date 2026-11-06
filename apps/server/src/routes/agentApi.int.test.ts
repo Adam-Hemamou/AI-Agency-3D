@@ -6,6 +6,10 @@ import {
   agentProspectContextSchema,
   issuedAgentKeyResponseSchema,
   missionCommandResponseSchema,
+  missionListQuerySchema,
+  missionListResponseSchema,
+  missionSchema,
+  createMissionRequestSchema,
   agentDossierSchema,
   prospectDossierSchema,
   prospectLookupResponseSchema,
@@ -148,6 +152,15 @@ function openMission(d: Pick<AgentDossier, 'missions'>, room: RoomId) {
   return m;
 }
 
+/**
+ * Mission ouverte d'un dossier, lue par le service (vue complète) : un agent ne voit pas les
+ * missions libres hors de sa salle, ni celles des autres agents.
+ */
+async function openMissionIn(prospectId: string, room: RoomId) {
+  const { items } = await missions.list(missionListQuerySchema.parse({ prospectId, limit: 200 }));
+  return openMission({ missions: items }, room);
+}
+
 function expectError(res: request.Response, status: number, code: string) {
   expect(res.status, JSON.stringify(res.body)).toBe(status);
   expect(res.body.error.code).toBe(code);
@@ -171,11 +184,11 @@ async function prospectInDubbing(agent: TestAgent) {
   const review = dossierOf(
     await call(agent, 'post', `/api/agent/prospects/${id}/stage`, { to: 'review' }).expect(200),
   );
-  const mission = openMission(review, 'director');
+  // Mon bureau est la salle de l'utilisateur : la mission de revue n'est visible d'aucun agent.
+  expect(review.missions.some((m) => m.room === 'director')).toBe(false);
+  const mission = await openMissionIn(id, 'director');
   for (const action of ['start', 'submit_for_validation']) {
-    await call(agent, 'post', `/api/agent/missions/${mission.id}/transitions`, { action }).expect(
-      200,
-    );
+    await owner.post(`/api/missions/${mission.id}/transitions`).send({ action }).expect(200);
   }
   return prospects.decideProspect(id, { missionId: mission.id, decision: 'approve' }, HUMAN_ACTOR);
 }
@@ -568,8 +581,9 @@ describe('enrichissement', () => {
 
 describe('analyses, productions et étapes', () => {
   it('ajoute une analyse et calcule le score, à l’étape d’analyse seulement', async () => {
-    const agent = await createAgent('agent-analyste');
-    const early = dossierOf(await call(agent, 'post', '/api/agent/prospects', prospectBody()));
+    const prospector = await createAgent('agent-prospecteur');
+    const agent = await createAgent('agent-analyste', AGENT_PERMISSIONS, 'analysis');
+    const early = dossierOf(await call(prospector, 'post', '/api/agent/prospects', prospectBody()));
     expectError(
       await call(
         agent,
@@ -581,11 +595,14 @@ describe('analyses, productions et étapes', () => {
       'FORBIDDEN_ACTOR',
     );
     const d = dossierOf(
-      await call(agent, 'post', `/api/agent/prospects/${early.prospect.id}/stage`, {
+      await call(prospector, 'post', `/api/agent/prospects/${early.prospect.id}/stage`, {
         to: 'analysis',
       }),
     );
-    const mission = openMission(d, 'analysis');
+    const mission = await openMissionIn(d.prospect.id, 'analysis');
+    await call(agent, 'post', `/api/agent/missions/${mission.id}/transitions`, {
+      action: 'start',
+    }).expect(200);
     const res = await call(
       agent,
       'post',
@@ -637,7 +654,8 @@ describe('analyses, productions et étapes', () => {
     });
     const after = dossierOf(res);
     expect(after.prospect.stage).toBe('review');
-    expect(openMission(after, 'director')).toMatchObject({
+    expect(after.missions.some((m) => m.room === 'director')).toBe(false);
+    expect(await openMissionIn(after.prospect.id, 'director')).toMatchObject({
       requiresValidation: true,
       agentId: null,
     });
@@ -713,6 +731,7 @@ describe('analyses, productions et étapes', () => {
 describe('e-mails : jamais envoyés sans l’utilisateur', () => {
   it('parcours complet : l’agent prépare, l’utilisateur valide et envoie', async () => {
     const agent = await createAgent('agent-commercial');
+    const reviewer = await createAgent('agent-relecteur', AGENT_PERMISSIONS, 'email_review');
     const d0 = await prospectInDubbing(agent);
     const id = d0.prospect.id;
     await call(agent, 'post', `/api/agent/prospects/${id}/stage`, { to: 'proposal' }).expect(200);
@@ -730,13 +749,15 @@ describe('e-mails : jamais envoyés sans l’utilisateur', () => {
         200,
       ),
     );
-    const mission = openMission(staged, 'email_review');
+    // Agent sans salle : il ne voit pas la mission libre de la salle de validation des e-mails.
+    expect(staged.missions.some((m) => m.room === 'email_review')).toBe(false);
+    const mission = await openMissionIn(id, 'email_review');
     expect(mission.requiresValidation).toBe(true);
-    await call(agent, 'post', `/api/agent/missions/${mission.id}/transitions`, {
+    await call(reviewer, 'post', `/api/agent/missions/${mission.id}/transitions`, {
       action: 'start',
     }).expect(200);
     const drafted = dossierOf(
-      await call(agent, 'post', `/api/agent/prospects/${id}/productions`, {
+      await call(reviewer, 'post', `/api/agent/prospects/${id}/productions`, {
         ...emailBody('pending_review'),
         missionId: mission.id,
       }).expect(201),
@@ -745,13 +766,13 @@ describe('e-mails : jamais envoyés sans l’utilisateur', () => {
 
     // L'agent ne peut terminer la mission seul : la validation humaine est exigée.
     expectError(
-      await call(agent, 'post', `/api/agent/missions/${mission.id}/transitions`, {
+      await call(reviewer, 'post', `/api/agent/missions/${mission.id}/transitions`, {
         action: 'complete',
       }),
       409,
       'VALIDATION_REQUIRED',
     );
-    await call(agent, 'post', `/api/agent/missions/${mission.id}/transitions`, {
+    await call(reviewer, 'post', `/api/agent/missions/${mission.id}/transitions`, {
       action: 'submit_for_validation',
     }).expect(200);
 
@@ -827,7 +848,7 @@ describe('missions', () => {
     const creator = await createAgent('agent-prospecteur');
     const writer = await createAgent('agent-redacteur', AGENT_PERMISSIONS, 'copywriting');
     const d = await prospectInAnalysis(creator);
-    const analysisMission = openMission(d, 'analysis'); // libre (agentId null)
+    const analysisMission = await openMissionIn(d.prospect.id, 'analysis'); // libre (agentId null)
     expectError(
       await call(writer, 'post', `/api/agent/missions/${analysisMission.id}/transitions`, {
         action: 'start',
@@ -835,6 +856,291 @@ describe('missions', () => {
       403,
       'FORBIDDEN_ACTOR',
     );
+  });
+});
+
+describe('attribution et visibilité des missions', () => {
+  /** Mission sans prospect créée par l'utilisateur, libre ou attribuée. */
+  async function newMission(room: RoomId, agentId: string | null = null) {
+    const input = createMissionRequestSchema.parse({ type: 'test.tache', room, agentId });
+    return (await missions.create(input, HUMAN_ACTOR)).mission;
+  }
+  const listIds = async (agent: TestAgent) =>
+    missionListResponseSchema
+      .parse((await call(agent, 'get', '/api/agent/missions').expect(200)).body)
+      .items.map((m) => m.id)
+      .sort();
+  const transition = (agent: TestAgent, id: string, body: Record<string, unknown>) =>
+    call(agent, 'post', `/api/agent/missions/${id}/transitions`, body);
+
+  it('démarrer une mission libre de sa salle la lui attribue, et l’historique le trace', async () => {
+    const analyst = await createAgent('agent-analyste', AGENT_PERMISSIONS, 'analysis');
+    const free = await newMission('analysis');
+    const res = await transition(analyst, free.id, { action: 'start' }).expect(200);
+    const { mission, event } = missionCommandResponseSchema.parse(res.body);
+    expect(mission).toMatchObject({ status: 'in_progress', agentId: 'agent-analyste' });
+    expect(event.changes.agentId).toEqual({ from: null, to: 'agent-analyste' });
+  });
+
+  it('deux agents démarrent la même mission en même temps : un seul l’obtient', async () => {
+    const a = await createAgent('agent-a', AGENT_PERMISSIONS, 'analysis');
+    const b = await createAgent('agent-b', AGENT_PERMISSIONS, 'analysis');
+    for (let round = 0; round < 5; round++) {
+      const free = await newMission('analysis');
+      const responses = await Promise.all([
+        transition(a, free.id, { action: 'start' }),
+        transition(b, free.id, { action: 'start' }),
+      ]);
+      const statuses = responses.map((r) => r.status).sort();
+      expect(statuses[0]).toBe(200);
+      expect([403, 409]).toContain(statuses[1]);
+      const winner = responses.find((r) => r.status === 200)!;
+      const owner = missionCommandResponseSchema.parse(winner.body).mission.agentId;
+      expect(missionSchema.parse(await missions.get(free.id))).toMatchObject({
+        agentId: owner,
+        attemptCount: 1,
+      });
+      const starts = (await missions.events(free.id)).filter((e) => e.action === 'start');
+      expect(starts).toHaveLength(1);
+    }
+  });
+
+  it('une fois prise, la mission est inaccessible aux autres agents de la salle', async () => {
+    const a = await createAgent('agent-a', AGENT_PERMISSIONS, 'analysis');
+    const b = await createAgent('agent-b', AGENT_PERMISSIONS, 'analysis');
+    const free = await newMission('analysis');
+    await transition(a, free.id, { action: 'start' }).expect(200);
+
+    for (const body of [
+      { action: 'pause' },
+      { action: 'complete' },
+      { action: 'block', reason: 'Je la prends' },
+    ]) {
+      expectError(await transition(b, free.id, body), 403, 'FORBIDDEN_ACTOR');
+    }
+    expectError(await call(b, 'get', `/api/agent/missions/${free.id}`), 403, 'FORBIDDEN_ACTOR');
+    expect(await listIds(b)).toEqual([]);
+    expect(await listIds(a)).toEqual([free.id]);
+    await transition(a, free.id, { action: 'complete' }).expect(200);
+  });
+
+  it('une mission libre ne peut être que démarrée : ni bloquée ni terminée sans être prise', async () => {
+    const analyst = await createAgent('agent-analyste', AGENT_PERMISSIONS, 'analysis');
+    const free = await newMission('analysis');
+    expectError(
+      await transition(analyst, free.id, { action: 'block', reason: 'Pas pour moi' }),
+      403,
+      'FORBIDDEN_ACTOR',
+    );
+    expect((await missions.get(free.id)).status).toBe('pending');
+  });
+
+  it('agent rattaché à une salle : voit ses missions et les missions libres de sa salle seulement', async () => {
+    const analyst = await createAgent('agent-analyste', AGENT_PERMISSIONS, 'analysis');
+    await createAgent('agent-autre', AGENT_PERMISSIONS, 'analysis');
+    const mine = await newMission('analysis', 'agent-analyste');
+    const freeHere = await newMission('analysis');
+    await newMission('analysis', 'agent-autre');
+    const freeElsewhere = await newMission('dubbing');
+    const mineElsewhere = await newMission('dubbing', 'agent-analyste');
+
+    expect(await listIds(analyst)).toEqual([mine.id, freeHere.id].sort());
+    // Total et pagination calculés sur les seules missions visibles.
+    const page = missionListResponseSchema.parse(
+      (await call(analyst, 'get', '/api/agent/missions?limit=1').expect(200)).body,
+    );
+    expect(page).toMatchObject({ total: 2, limit: 1 });
+    for (const hidden of [freeElsewhere, mineElsewhere]) {
+      expectError(
+        await call(analyst, 'get', `/api/agent/missions/${hidden.id}`),
+        403,
+        'FORBIDDEN_ACTOR',
+      );
+    }
+  });
+
+  it('agent sans salle : uniquement ses missions, et il ne peut prendre aucune mission libre', async () => {
+    const roaming = await createAgent('agent-itinerant');
+    const mine = await newMission('dubbing', 'agent-itinerant');
+    const free = await newMission('analysis');
+
+    expect(await listIds(roaming)).toEqual([mine.id]);
+    expectError(
+      await call(roaming, 'get', `/api/agent/missions/${free.id}`),
+      403,
+      'FORBIDDEN_ACTOR',
+    );
+    expectError(await transition(roaming, free.id, { action: 'start' }), 403, 'FORBIDDEN_ACTOR');
+    expect((await missions.get(free.id)).agentId).toBeNull();
+    // Sa propre mission, elle, peut évoluer normalement.
+    await transition(roaming, mine.id, { action: 'start' }).expect(200);
+  });
+
+  it('le dossier ne montre jamais les missions d’un autre agent', async () => {
+    const prospector = await createAgent('agent-prospecteur');
+    const d = await prospectInAnalysis(prospector);
+    const analysisMission = await openMissionIn(d.prospect.id, 'analysis');
+    await createAgent('agent-analyste', AGENT_PERMISSIONS, 'analysis');
+    await missions.applyAction(
+      analysisMission.id,
+      { action: 'start' },
+      { type: 'agent', id: 'agent-analyste' },
+    );
+
+    const ctx = agentProspectContextSchema.parse(
+      (await call(prospector, 'get', `/api/agent/prospects/${d.prospect.id}/context`).expect(200))
+        .body,
+    );
+    // Il garde sa mission de prospection ; la mission d'analyse, prise par un autre, disparaît.
+    expect(ctx.dossier.missions.map((m) => m.room)).toEqual(['prospecting']);
+    expect(ctx.dossier.missions.every((m) => m.agentId === 'agent-prospecteur')).toBe(true);
+  });
+
+  it('une mission ne peut être attribuée qu’à un agent existant', async () => {
+    for (const agentId of ['agent-inconnu', 'owner', 'n8n']) {
+      const res = await owner
+        .post('/api/missions')
+        .send({ type: 'test.tache', room: 'analysis', agentId });
+      expectError(res, 400, 'VALIDATION_ERROR');
+    }
+    await createAgent('agent-analyste', AGENT_PERMISSIONS, 'analysis');
+    await owner
+      .post('/api/missions')
+      .send({ type: 'test.tache', room: 'analysis', agentId: 'agent-analyste' })
+      .expect(201);
+  });
+});
+
+describe('missions citées dans une analyse, une production ou une activité', () => {
+  /** Dossier à l'étape d'analyse, et deux analystes de la salle d'analyse. */
+  async function setup() {
+    const prospector = await createAgent('agent-prospecteur');
+    const a = await createAgent('agent-analyste-a', AGENT_PERMISSIONS, 'analysis');
+    const b = await createAgent('agent-analyste-b', AGENT_PERMISSIONS, 'analysis');
+    const d = await prospectInAnalysis(prospector);
+    const mission = await openMissionIn(d.prospect.id, 'analysis'); // libre
+    return { a, b, prospectId: d.prospect.id, missionId: mission.id };
+  }
+  const addAnalysis = (agent: TestAgent, prospectId: string, missionId: string) =>
+    call(agent, 'post', `/api/agent/prospects/${prospectId}/analyses`, analysisBody(missionId));
+  const addActivity = (agent: TestAgent, prospectId: string, missionId: string) =>
+    call(agent, 'post', `/api/agent/prospects/${prospectId}/events`, {
+      title: 'Travail en cours',
+      missionId,
+    });
+  const start = (agent: TestAgent, missionId: string) =>
+    call(agent, 'post', `/api/agent/missions/${missionId}/transitions`, {
+      action: 'start',
+    }).expect(200);
+  /** Rien n'a été enregistré au nom de cet agent sur le dossier. */
+  async function expectNothingRecordedBy(agentId: string, prospectId: string) {
+    const d = await prospects.getDossier(prospectId);
+    expect(d.analyses.filter((x) => x.actorId === agentId)).toEqual([]);
+    expect(d.productions.filter((x) => x.actorId === agentId)).toEqual([]);
+    expect(d.events.filter((e) => e.actorId === agentId)).toEqual([]);
+  }
+
+  it('refuse la mission d’un autre agent du même dossier (analyse et activité)', async () => {
+    const { a, b, prospectId, missionId } = await setup();
+    await start(a, missionId);
+    expectError(await addAnalysis(b, prospectId, missionId), 403, 'FORBIDDEN_ACTOR');
+    expectError(await addActivity(b, prospectId, missionId), 403, 'FORBIDDEN_ACTOR');
+    await expectNothingRecordedBy(b.id, prospectId);
+    // Le propriétaire, lui, peut y rattacher ses résultats.
+    await addAnalysis(a, prospectId, missionId).expect(201);
+    await addActivity(a, prospectId, missionId).expect(201);
+  });
+
+  it('refuse une mission libre que l’agent n’a pas prise', async () => {
+    const { a, prospectId, missionId } = await setup();
+    expectError(await addAnalysis(a, prospectId, missionId), 403, 'FORBIDDEN_ACTOR');
+    expectError(await addActivity(a, prospectId, missionId), 403, 'FORBIDDEN_ACTOR');
+    await expectNothingRecordedBy(a.id, prospectId);
+    expect((await missions.get(missionId)).agentId).toBeNull();
+  });
+
+  it('refuse sa propre mission si elle n’est pas en cours (en attente, en pause, terminée)', async () => {
+    const { a, prospectId } = await setup();
+    const input = createMissionRequestSchema.parse({
+      type: 'analysis.extra',
+      room: 'analysis',
+      agentId: a.id,
+      prospectId,
+    });
+    const { mission } = await missions.create(input, HUMAN_ACTOR);
+    const expectNotInProgress = async (status: string) => {
+      for (const res of [
+        await addAnalysis(a, prospectId, mission.id),
+        await addActivity(a, prospectId, mission.id),
+      ]) {
+        expectError(res, 409, 'INVALID_TRANSITION');
+        expect(res.body.error.details).toMatchObject({ currentStatus: status });
+      }
+    };
+    await expectNotInProgress('pending');
+    await start(a, mission.id);
+    await call(a, 'post', `/api/agent/missions/${mission.id}/transitions`, {
+      action: 'pause',
+    }).expect(200);
+    await expectNotInProgress('paused');
+    for (const action of ['resume', 'complete']) {
+      await call(a, 'post', `/api/agent/missions/${mission.id}/transitions`, { action }).expect(
+        200,
+      );
+    }
+    await expectNotInProgress('completed');
+    await expectNothingRecordedBy(a.id, prospectId);
+  });
+
+  it('production : seule la mission en cours de l’agent peut être citée', async () => {
+    const creator = await createAgent('agent-commercial');
+    const p = await createAgent('agent-doublage-p', AGENT_PERMISSIONS, 'dubbing');
+    const q = await createAgent('agent-doublage-q', AGENT_PERMISSIONS, 'dubbing');
+    const d = await prospectInDubbing(creator);
+    const mission = await openMissionIn(d.prospect.id, 'dubbing');
+    const produce = (agent: TestAgent) =>
+      call(agent, 'post', `/api/agent/prospects/${d.prospect.id}/productions`, {
+        ...dubbingBody(),
+        missionId: mission.id,
+      });
+
+    expectError(await produce(p), 403, 'FORBIDDEN_ACTOR'); // pas encore prise
+    await start(p, mission.id);
+    expectError(await produce(q), 403, 'FORBIDDEN_ACTOR'); // celle d'un autre agent
+    await expectNothingRecordedBy(q.id, d.prospect.id);
+    const res = await produce(p).expect(201);
+    expect(dossierOf(res).productions.at(-1)).toMatchObject({
+      missionId: mission.id,
+      actorId: p.id,
+    });
+  });
+
+  it('l’utilisateur et le système gardent le comportement actuel', async () => {
+    const { prospectId, missionId } = await setup();
+    // Mission libre, non démarrée : acceptée pour l'utilisateur comme pour le système.
+    await prospects.logActivity(prospectId, { title: 'Note', missionId }, HUMAN_ACTOR);
+    await prospects.logActivity(
+      prospectId,
+      { title: 'Relevé', missionId },
+      {
+        type: 'system',
+        id: null,
+      },
+    );
+    const d = await prospects.addAnalysis(prospectId, analysisBody(missionId), HUMAN_ACTOR);
+    expect(d.analyses[0]).toMatchObject({ missionId, actorType: 'user' });
+    // La vérification du dossier, elle, s'applique toujours à tous.
+    const other = dossierOf(
+      await call(
+        await createAgent('agent-autre-createur'),
+        'post',
+        '/api/agent/prospects',
+        prospectBody({ youtubeChannelId: 'UC-AUTRE', channelHandle: null, channelUrl: null }),
+      ),
+    );
+    await expect(
+      prospects.logActivity(other.prospect.id, { title: 'x', missionId }, HUMAN_ACTOR),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
   });
 });
 

@@ -11,7 +11,7 @@ import { createOwnerAuthService } from '../auth/ownerAuth.ts';
 import { ownerClient } from '../test/ownerSession.ts';
 import { AppError } from '../errors/AppError.ts';
 import { createMissionService, type Actor } from '../missions/missionService.ts';
-import { createTestPrisma, resetDatabase } from '../test/testDb.ts';
+import { createTestAgent, createTestPrisma, resetDatabase } from '../test/testDb.ts';
 import { createProspectService } from './prospectService.ts';
 
 const prisma = createTestPrisma();
@@ -20,6 +20,10 @@ const service = createProspectService({ prisma, missions, simulationMode: true }
 
 const owner: Actor = { type: 'user', id: 'owner' };
 const agent: Actor = { type: 'agent', id: 'agent-test' };
+/** Les missions de décision humaine (Mon bureau, validation des e-mails) sont lancées par le système. */
+const system: Actor = { type: 'system', id: null };
+/** Agent de la salle de validation des e-mails : il prend la mission et y rattache l'e-mail. */
+const reviewer: Actor = { type: 'agent', id: 'agent-relecteur' };
 
 const baseProspect: CreateProspectRequest = {
   creatorName: 'Créateur Test',
@@ -80,8 +84,8 @@ async function prospectInReview(): Promise<ProspectDossier> {
     mission: { type: PIPELINE_MISSION_TYPES.review, room: 'director', requiresValidation: true },
   });
   const review = openMission(d, 'director');
-  await missions.applyAction(review.id, { action: 'start' }, agent);
-  await missions.applyAction(review.id, { action: 'submit_for_validation' }, agent);
+  await missions.applyAction(review.id, { action: 'start' }, system);
+  await missions.applyAction(review.id, { action: 'submit_for_validation' }, system);
   return service.getDossier(d.prospect.id);
 }
 
@@ -102,7 +106,7 @@ async function prospectWithEmail(): Promise<ProspectDossier> {
     },
   });
   const mission = openMission(d, 'email_review');
-  await missions.applyAction(mission.id, { action: 'start' }, agent);
+  await missions.applyAction(mission.id, { action: 'start' }, reviewer);
   d = await service.addProduction(
     d.prospect.id,
     {
@@ -111,9 +115,9 @@ async function prospectWithEmail(): Promise<ProspectDossier> {
       status: 'pending_review',
       content: { to: 'test@exemple.example', subject: 'Objet', body: 'Corps' },
     },
-    agent,
+    reviewer,
   );
-  await missions.applyAction(mission.id, { action: 'submit_for_validation' }, agent);
+  await missions.applyAction(mission.id, { action: 'submit_for_validation' }, reviewer);
   return service.getDossier(d.prospect.id);
 }
 
@@ -121,6 +125,8 @@ const latestEmail = (d: ProspectDossier) => d.productions.find((p) => p.kind ===
 
 beforeEach(async () => {
   await resetDatabase();
+  await createTestAgent(prisma, agent.id!);
+  await createTestAgent(prisma, reviewer.id!, 'email_review');
 });
 
 afterAll(async () => {
