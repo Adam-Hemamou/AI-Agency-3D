@@ -1,12 +1,16 @@
 import { Router } from 'express';
 import {
   ERROR_CODES,
+  agentPromptVersionParamSchema,
   agentsSwitchRequestSchema,
+  createAgentPromptRequestSchema,
   createAgentRequestSchema,
   issueAgentKeyRequestSchema,
+  updateAgentProfileRequestSchema,
   updateAgentRequestSchema,
   type AgentIdentityResponse,
 } from '@agency/shared';
+import type { AgentProfileService } from '../agents/agentProfileService.ts';
 import type { AgentService } from '../agents/agentService.ts';
 import { toAgentIdentityDto, toAgentKeyDto } from '../agents/serializers.ts';
 import type { AgentControl } from '../agents/agentControl.ts';
@@ -24,11 +28,13 @@ import { parseOrThrow } from '../lib/validate.ts';
 export interface AgentsRouterOptions {
   quotas?: QuotaService;
   control?: AgentControl;
+  /** Profils IA et prompts versionnés (sans lui, ces routes répondent 404). */
+  profiles?: AgentProfileService;
 }
 
 export function agentsRouter(
   agents: AgentService,
-  { quotas, control }: AgentsRouterOptions = {},
+  { quotas, control, profiles }: AgentsRouterOptions = {},
 ): Router {
   const router = Router();
 
@@ -100,6 +106,45 @@ export function agentsRouter(
 
   router.post('/:id/keys/:keyId/revoke', async (req, res) => {
     res.json(await agents.revokeKey(req.params.id, req.params.keyId, actorOf(res)));
+  });
+
+  // ---------------------------------------------------------------------------
+  // Profil IA et prompts versionnés (utilisateur uniquement ; un agent lit le sien par
+  // GET /api/agent/profile). Les versions ne sont jamais modifiées : on en crée une nouvelle.
+  // ---------------------------------------------------------------------------
+  const profilesOf = (): AgentProfileService => {
+    if (!profiles) throw AppError.notFound('Profils des agents non configurés');
+    return profiles;
+  };
+  const versionOf = (value: unknown) =>
+    parseOrThrow(agentPromptVersionParamSchema, value, 'Version du prompt');
+
+  router.get('/:id/profile', async (req, res) => {
+    res.json(await profilesOf().getProfile(req.params.id));
+  });
+
+  router.patch('/:id/profile', async (req, res) => {
+    const request = parseOrThrow(updateAgentProfileRequestSchema, req.body, 'Profil de l’agent');
+    res.json(await profilesOf().updateProfile(req.params.id, request, actorOf(res)));
+  });
+
+  router.get('/:id/prompts', async (req, res) => {
+    res.json(await profilesOf().listPrompts(req.params.id));
+  });
+
+  router.post('/:id/prompts', async (req, res) => {
+    const input = parseOrThrow(createAgentPromptRequestSchema, req.body, 'Prompt de l’agent');
+    res.status(201).json(await profilesOf().createPrompt(req.params.id, input, actorOf(res)));
+  });
+
+  router.get('/:id/prompts/:version', async (req, res) => {
+    res.json(await profilesOf().getPrompt(req.params.id, versionOf(req.params.version)));
+  });
+
+  router.post('/:id/prompts/:version/activate', async (req, res) => {
+    res.json(
+      await profilesOf().activatePrompt(req.params.id, versionOf(req.params.version), actorOf(res)),
+    );
   });
 
   return router;

@@ -18,6 +18,7 @@ import type { DatabaseProbe } from './db/prisma.ts';
 import { errorHandler, notFoundHandler } from './errors/errorHandler.ts';
 import type { MissionService } from './missions/missionService.ts';
 import type { ProspectService } from './prospects/prospectService.ts';
+import type { AgentProfileService } from './agents/agentProfileService.ts';
 import { agentApiRouter } from './routes/agentApi.ts';
 import { agentsRouter } from './routes/agents.ts';
 import { authRouter } from './routes/auth.ts';
@@ -32,6 +33,8 @@ export interface AppDeps {
   prospects?: ProspectService;
   /** Facultatif : sans lui, aucune clé d'agent n'est acceptée (toute clé présentée → 401). */
   agents?: AgentService;
+  /** Profils IA et prompts versionnés des agents. */
+  profiles?: AgentProfileService;
   /** Requêtes répétées des agents. Requis (avec agents et prospects) pour ouvrir /api/agent. */
   idempotency?: IdempotencyStore;
   /**
@@ -99,7 +102,11 @@ export function createApp(deps: AppDeps): Express {
   if (deps.agents) {
     app.use(
       '/api/agents',
-      agentsRouter(deps.agents, { quotas: deps.quotas, control: deps.agentControl }),
+      agentsRouter(deps.agents, {
+        quotas: deps.quotas,
+        control: deps.agentControl,
+        profiles: deps.profiles,
+      }),
     );
   }
   if (deps.agents && deps.prospects && deps.idempotency && deps.quotas && deps.agentControl) {
@@ -111,6 +118,7 @@ export function createApp(deps: AppDeps): Express {
         idempotency: deps.idempotency,
         quotas: deps.quotas,
         control: deps.agentControl,
+        profiles: deps.profiles,
       }),
     );
   }

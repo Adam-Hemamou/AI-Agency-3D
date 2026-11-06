@@ -261,6 +261,13 @@ Migration `20261105140000_agent_api` :
 | `agent_permissions` | Permissions accordées à chaque agent (`AGENT_PERMISSIONS`) ; aucune par défaut                                                |
 | `agent_requests`    | Écritures des agents : clé d'idempotence (unique par agent), empreinte de la requête, réponse enregistrée. Conservées 7 jours |
 
+Migration `20261107090000_agent_profiles` (voir [§ 7 septies](#7-septies-profils-ia-et-prompts-versionnés)) :
+
+| Table            | Contenu                                                                                                                                   |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent_profiles` | Profil IA (une ligne au plus par agent) : rôle, modèle, paramètres d'inférence bornés (`CHECK`), version active du prompt (clé étrangère) |
+| `agent_prompts`  | Versions du prompt système (`agent_id`, `version`), **inaltérables en base** (triggers : ni modification, ni suppression)                 |
+
 ## 7 ter. API du CRM
 
 Contrat : `packages/shared/src/prospectApi.ts`. Toutes les actions renvoient le dossier complet à jour.
@@ -347,6 +354,7 @@ Contrat : `packages/shared/src/agentApi.ts` ; règles : `packages/shared/src/age
 
 | Méthode et route                                         | Permission          | Rôle                                                                         |
 | -------------------------------------------------------- | ------------------- | ---------------------------------------------------------------------------- |
+| `GET /api/agent/profile`                                 | aucune              | Son profil IA : rôle, paramètres du modèle, prompt actif                     |
 | `GET /api/agent/prospects/lookup`                        | `prospects:read`    | Doublons : `youtubeChannelId`, `channelHandle`, `channelUrl`, `contactEmail` |
 | `GET /api/agent/prospects/:id/context`                   | `prospects:read`    | Dossier complet + ce que l'agent peut faire maintenant                       |
 | `POST /api/agent/prospects`                              | `prospects:create`  | Créer un prospect et son dossier (refusé si doublon : 409 `ALREADY_EXISTS`)  |
@@ -492,6 +500,36 @@ Lot E (`apps/server/src/agents/quotas.ts`, `agentControl.ts`, `rateLimit.ts` ; c
 - L'utilisateur garde un accès normal au CRM. Aucun agent ne peut ni déclencher ni lever l'arrêt (route réservée).
 - Sans contrôle configuré (`agentControl` absent), les agents sont refusés par défaut. État illisible au démarrage →
   agents arrêtés par précaution.
+
+## 7 septies. Profils IA et prompts versionnés
+
+Phase 2, étape 1 (`apps/server/src/agents/agentProfileService.ts`, contrat : `packages/shared/src/agentProfiles.ts`).
+Chaque agent spécialisé a son rôle, son prompt système et ses paramètres ; tous utilisent le même modèle par défaut.
+
+- **Profil absent = valeurs par défaut** (`AGENT_MODEL_DEFAULTS`), adaptées à Qwen3:8b sur Ollama pour des réponses
+  JSON : `model: qwen3:8b`, `think: false` (pas de bloc `<think>`), `temperature: 0.2`, `topP: 0.8`, `topK: 20`,
+  `numCtx: 8192` (Ollama tronque sans prévenir un prompt plus long que son contexte), `numPredict: 2048`,
+  `timeoutSeconds: 180`. Bornes : `AGENT_MODEL_LIMITS`, vérifiées par Zod **et** par la base.
+- **Prompts versionnés** : une modification crée la version suivante (numéros consécutifs par agent, ligne de
+  l'agent verrouillée pendant l'écriture). Une version n'est **jamais** modifiée ni supprimée. Une nouvelle version
+  n'est active que si `activate: true` ; n'importe quelle version existante peut être réactivée (retour arrière).
+- **Taille** : 20 000 caractères Unicode au plus, comptés comme MySQL (`CHAR_LENGTH`) : un emoji, un idéogramme ou
+  une lettre accentuée comptent pour 1. Colonne `MEDIUMTEXT` utf8mb4 (16 Mo) : 80 000 octets au pire, bien au-delà
+  des 65 535 octets d'un `TEXT`.
+- **Gestion réservée à l'utilisateur** (service : `assertHumanActor` ; routes refusées aux agents par la liste
+  blanche, et jamais accessibles par l'écoute Tailscale). Gestion provisoire par l'API ; écran prévu plus tard.
+- **Un agent lit uniquement son profil** : `GET /api/agent/profile`, identité tirée de sa clé (aucun paramètre ne
+  permet de lire celui d'un autre), sans permission requise. `prompt: null` tant qu'aucune version n'est active.
+
+| Méthode et route                                 | Rôle                                                               | Accès  |
+| ------------------------------------------------ | ------------------------------------------------------------------ | ------ |
+| `GET /api/agents/:id/profile`                    | Profil (valeurs par défaut si absent, `isDefault: true`)           | Humain |
+| `PATCH /api/agents/:id/profile`                  | Rôle et paramètres ; seuls les champs fournis changent             | Humain |
+| `GET /api/agents/:id/prompts`                    | Versions, de la plus récente à la plus ancienne (`active` indiqué) | Humain |
+| `POST /api/agents/:id/prompts`                   | Nouvelle version (`systemPrompt`, `note?`, `activate?` = false)    | Humain |
+| `GET /api/agents/:id/prompts/:version`           | Une version                                                        | Humain |
+| `POST /api/agents/:id/prompts/:version/activate` | Rendre une version active                                          | Humain |
+| `GET /api/agent/profile`                         | Son rôle, ses paramètres et son prompt actif (pour n8n)            | Agent  |
 
 ## 7 bis. API des missions
 
@@ -811,3 +849,4 @@ Chaque phase est validée avant de passer à la suivante.
 | 06/11/2026 | **Accès du VPS par Tailscale** : deuxième écoute sur l'adresse Tailscale du PC, filtrée à la connexion (VPS seul) puis par route (routes des agents seulement), en plus de 127.0.0.1 inchangée. Jamais 0.0.0.0.                                                                                                                                           |
 | 06/11/2026 | **Phase 1 des agents** : démarrer une mission libre l'attribue à l'agent (atomique) ; un agent ne voit que ses missions et les libres de sa salle ; mission interrompue → `blocked` (`INTERRUPTED`), jamais remise en attente automatiquement. Aucune migration : `agent_id` reste sans clé étrangère, l'existence de l'agent est vérifiée à la création. |
 | 06/11/2026 | Un agent ne rattache un résultat (analyse, production, activité) qu'à **sa** mission **en cours** ; verrou de la mission partagé entre ces écritures et la récupération des missions interrompues. Aucune migration.                                                                                                                                      |
+| 07/11/2026 | **Phase 2, étape 1** : profils IA (`agent_profiles`) et prompts versionnés inaltérables (`agent_prompts`) ; valeurs par défaut pour Qwen3:8b (`think: false`, `num_ctx` 8192) ; `GET /api/agent/profile` pour n8n. Migration additive.                                                                                                                    |
