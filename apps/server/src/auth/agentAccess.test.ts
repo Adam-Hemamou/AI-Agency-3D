@@ -22,6 +22,8 @@ describe('routes ouvertes aux agents : permission exigée par route', () => {
     ['POST', `/api/agent/prospects/${ID}/stage`, 'stages:advance'],
     ['POST', `/api/agent/prospects/${ID}/events`, 'events:write'],
     ['POST', `/api/agent/missions/${ID}/transitions`, 'missions:update'],
+    ['POST', '/api/agent/creators/assess', 'creators:assess'],
+    ['POST', '/api/agent/creators/assess/', 'creators:assess'],
   ])('%s %s → %s', (method, path, permission) => {
     expect(findAgentRoute(method, path)?.permission).toBe(permission);
     expect(isAgentRequestAllowed(method, path, ALL)).toBe(true);
@@ -73,6 +75,14 @@ describe('routes ouvertes aux agents : permission exigée par route', () => {
     ['POST', `/api/agent/prospects/${ID}/send`],
     ['POST', `/api/agent/missions/${ID}/validation`],
     ['GET', '/api/agent/prospects'],
+    // Évaluation linguistique : POST sur le chemin exact uniquement.
+    ['GET', '/api/agent/creators/assess'],
+    ['PUT', '/api/agent/creators/assess'],
+    ['PATCH', '/api/agent/creators/assess'],
+    ['DELETE', '/api/agent/creators/assess'],
+    ['POST', '/api/agent/creators'],
+    ['POST', `/api/agent/creators/${ID}/assess`],
+    ['POST', '/api/agent/creators/assess/extra'],
     ['GET', '/api/inconnue'],
   ])('refuse %s %s, quelles que soient les permissions', (method, path) => {
     expect(findAgentRoute(method, path)).toBeNull();

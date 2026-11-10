@@ -70,6 +70,12 @@ export const AGENT_ROUTES: readonly AgentRoute[] = [
     pattern: /^\/api\/agent\/channels\/rejections\/?$/,
     permission: 'channels:reject',
   },
+  // Évaluation linguistique d'un créateur (FR → EN et EN → FR) : calcul seul, rien n'est enregistré.
+  {
+    methods: ['POST'],
+    pattern: /^\/api\/agent\/creators\/assess\/?$/,
+    permission: 'creators:assess',
+  },
   {
     methods: READ,
     pattern: new RegExp(`^/api/agent/missions/${SEG}/?$`),

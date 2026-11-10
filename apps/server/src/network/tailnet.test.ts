@@ -207,6 +207,7 @@ const AGENT_ENDPOINT_SAMPLES: readonly [method: string, path: string][] = [
   ['POST', `/api/agent/prospects/${ID}/stage`],
   ['POST', `/api/agent/prospects/${ID}/events`],
   ['POST', `/api/agent/missions/${ID}/transitions`],
+  ['POST', '/api/agent/creators/assess'],
 ];
 describe('routes accessibles via Tailscale', () => {
   it('les exemples couvrent toutes les routes de la liste blanche des agents', () => {

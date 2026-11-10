@@ -490,6 +490,7 @@ Contrat : `packages/shared/src/agentApi.ts` ; règles : `packages/shared/src/age
 | `POST /api/agent/prospects/:id/events`                   | `events:write`      | Ajouter une activité à l'historique (type `agent_activity`)                           |
 | `POST /api/agent/missions/:id/transitions`               | `missions:update`   | Mettre en pause, soumettre, terminer, bloquer (démarrer : `runs/claim`)               |
 | `GET /api/agent/missions`, `GET /api/agent/missions/:id` | `missions:read`     | Missions (sans historique) : les siennes et les libres de sa salle                    |
+| `POST /api/agent/creators/assess`                        | `creators:assess`   | Évaluation linguistique d'un créateur (FR → EN et EN → FR) ; calcul seul (7 octies)   |
 
 **Lecture filtrée (lot D).** Les agents ne lisent **que** par `/api/agent/…` : toutes les routes de l'interface leur
 sont fermées, même en lecture (elles renvoient le dossier complet et l'historique des missions, qui contient les motifs
@@ -658,8 +659,17 @@ Chaque agent spécialisé a son rôle, son prompt système et ses paramètres ; 
 
 ## 7 octies. Moteur d'évaluation linguistique (prospecteurs FR → EN et EN → FR)
 
-Phase 1 : moteur seul, sans route, sans base de données (`apps/server/src/language/`, contrat :
-`packages/shared/src/languageAssessment.ts`). Point d'entrée unique : `assessCreator()`.
+Moteur : `apps/server/src/language/` (phase 1), contrat : `packages/shared/src/languageAssessment.ts`. Point d'entrée
+unique : `assessCreator()`. Exposé aux agents par `POST /api/agent/creators/assess` (phase 2), sans base de données.
+
+**Route (phase 2).** `POST /api/agent/creators/assess`, permission `creators:assess` (rôle prospecteur ; à accorder
+explicitement aux agents existants). Corps : `languageAssessmentInputSchema` (`observedAt`, `channel`, `videos` ≤ 50,
+`comments` ≤ 100, éléments bruts de YouTube). Réponse 200 : `LanguageAssessment`, **les deux directions** toujours
+évaluées, indépendamment. Calcul seul : aucune écriture (ni base, ni idempotence, ni quota), aucun journal ; pas
+d'en-tête `Idempotency-Key`. Erreurs : 400 (chemins des champs fautifs uniquement), 401, 403 (permission, utilisateur
+humain, autre méthode), 413 (corps > 256 Ko, limite des agents inchangée), 429, 503 (arrêt d'urgence). Accessible par
+l'écoute Tailscale sans modification (chemin `/api/agent/…`). Taille : n8n réduit les réponses YouTube avec le
+paramètre `fields` et limite l'échantillon à 15-20 vidéos (voir `automations/n8n/prospecteur/README.md`).
 
 - **Rôles** : n8n orchestre (appels YouTube, Qwen3) ; le CRM calcule, de façon déterministe ; Qwen3 ne produit
   **aucun** score, seulement l'analyse qualitative.
@@ -687,8 +697,8 @@ Phase 1 : moteur seul, sans route, sans base de données (`apps/server/src/langu
 - **Confiance** (`low`, `medium`, `high`) distincte du score : elle dépend de la langue du contenu, de la taille de
   l'échantillon de commentaires et de la couverture. Un score faible peut être sûr.
 - **Commentaires** : leurs textes servent uniquement à compter des langues, en mémoire. Ils ne figurent jamais dans
-  le résultat ; une entrée invalide est refusée avec le seul chemin du champ fautif, jamais sa valeur. Ils ne doivent
-  pas non plus être journalisés ni enregistrés lorsque le moteur sera exposé par une route (phase suivante).
+  le résultat ; une entrée invalide est refusée avec le seul chemin du champ fautif, jamais sa valeur. La route ne les
+  journalise ni ne les enregistre (vérifié par les tests d'intégration : réponses, erreurs, journaux et base).
 
 ## 7 bis. API des missions
 

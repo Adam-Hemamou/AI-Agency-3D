@@ -27,6 +27,7 @@ import {
   externalActionPolicy,
   PUBLIC_DATA_SOURCES,
   type AgentCapabilitiesResponse,
+  type LanguageAssessment,
   createProductionRequestSchema,
   enrichProspectRequestSchema,
   missionTransitionRequestSchema,
@@ -53,6 +54,7 @@ import {
 } from '../agents/idempotency.ts';
 import type { WriteResource } from '../db/transactionHook.ts';
 import { AppError } from '../errors/AppError.ts';
+import { assessCreator } from '../language/assessCreator.ts';
 import { parseOrThrow } from '../lib/validate.ts';
 import type { MissionService } from '../missions/missionService.ts';
 import type { ProspectService } from '../prospects/prospectService.ts';
@@ -321,6 +323,19 @@ export function agentApiRouter({
     const { name } = req.params;
     if (!isAgentJsonSchemaName(name)) throw AppError.notFound(`Schéma inconnu : ${name}`);
     res.json(agentJsonSchema(name));
+  });
+
+  /**
+   * Évaluation linguistique d'un créateur à partir des réponses brutes de la YouTube Data API v3 :
+   * langue du contenu, puis score et confiance pour les DEUX directions (FR → EN et EN → FR).
+   * Calcul déterministe seul (moteur apps/server/src/language) : aucune écriture, aucun quota,
+   * aucun journal. Les textes des commentaires ne servent qu'à compter des langues ; ils ne
+   * figurent ni dans la réponse ni dans les erreurs (chemins des champs fautifs uniquement).
+   */
+  router.post('/creators/assess', (req, res) => {
+    agentOf(res);
+    const body: LanguageAssessment = assessCreator(req.body);
+    res.json(body);
   });
 
   if (campaigns) {
