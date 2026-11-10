@@ -700,6 +700,16 @@ paramètre `fields` et limite l'échantillon à 15-20 vidéos (voir `automations
   le résultat ; une entrée invalide est refusée avec le seul chemin du champ fautif, jamais sa valeur. La route ne les
   journalise ni ne les enregistre (vérifié par les tests d'intégration : réponses, erreurs, journaux et base).
 
+## 7 nonies. Installation des deux prospecteurs (FR → EN et EN → FR)
+
+`apps/server/src/setup/installProspectors.ts` (ligne de commande) et `prospectorAgents.ts` (logique, testée sur la
+base de test). Crée `agent-prospecteur-fr-en` et `agent-prospecteur-en-fr` : salle `prospecting`, permissions du rôle
+prospecteur (dont `creators:assess`), profil IA, prompt (`automations/n8n/prospecteur/prompt-*-v1.md`), une clé API
+et une campagne de départ **désactivée**, attribuée à l'agent. Passe uniquement par les services du CRM, au nom de
+l'utilisateur. Simulation par défaut, base de **test** par défaut ; production seulement avec
+`--target=production --confirm=ai_agency`. Idempotente : relancée, elle n'écrit rien ; ce qui existe n'est jamais
+écrasé (écart signalé), sauf les permissions requises manquantes. Mode d'emploi : `automations/n8n/prospecteur/README.md`.
+
 ## 7 bis. API des missions
 
 Contrat (schémas Zod des requêtes et des réponses) : `packages/shared/src/missionApi.ts`.

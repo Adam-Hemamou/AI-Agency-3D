@@ -4,11 +4,39 @@ Premier agent de l'agence : il prend la mission de recherche du jour d'une campa
 créateurs sur YouTube, écarte les doublons et les profils hors critères, fait qualifier les autres
 par Qwen3, puis enregistre les prospects retenus dans le CRM et les transmet à l'Analyste.
 
-| Fichier                                             | Rôle                                                                   |
-| --------------------------------------------------- | ---------------------------------------------------------------------- |
-| `workflow.json`                                     | Workflow à importer dans n8n (« Prospecteur YouTube »)                 |
-| `prompt-v1.md`                                      | Prompt système v1, enregistré dans le CRM par le script d'installation |
-| `../../../apps/server/src/setup/setupProspector.ts` | Crée l'agent, son profil, son prompt, sa clé et la campagne de test    |
+| Fichier                                                | Rôle                                                                                    |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| `workflow.json`                                        | Workflow à importer dans n8n (« Prospecteur YouTube »)                                  |
+| `prompt-v1.md`                                         | Prompt système v1, enregistré dans le CRM par le script d'installation                  |
+| `../../../apps/server/src/setup/setupProspector.ts`    | Crée l'agent, son profil, son prompt, sa clé et la campagne de test                     |
+| `prompt-fr-en-v1.md`, `prompt-en-fr-v1.md`             | Prompts des deux prospecteurs (FR → EN, EN → FR), installés par `installProspectors.ts` |
+| `../../../apps/server/src/setup/installProspectors.ts` | Installe les DEUX prospecteurs (voir « Installation des deux prospecteurs »)            |
+
+## Installation des deux prospecteurs
+
+Deux agents indépendants, dans la même salle de prospection : `agent-prospecteur-fr-en` (créateurs
+qui publient en français, potentiel anglophone) et `agent-prospecteur-en-fr` (créateurs qui
+publient en anglais, potentiel francophone). Chacun reçoit son identité, les permissions du rôle
+prospecteur (dont `creators:assess`), son profil IA, son prompt, sa clé API et une campagne de
+départ **désactivée** (aucune mission, aucun appel YouTube tant qu'elle n'est pas activée).
+
+```bash
+cd apps/server
+npx tsx src/setup/installProspectors.ts                     # simulation sur la base de TEST
+npx tsx src/setup/installProspectors.ts --apply             # installation sur la base de TEST
+npx tsx src/setup/installProspectors.ts --target=production --confirm=ai_agency          # simulation
+npx tsx src/setup/installProspectors.ts --target=production --confirm=ai_agency --apply  # production
+```
+
+- **Relançable** : rien n'est créé deux fois ; ce qui existe n'est jamais écrasé (un écart est
+  signalé), sauf les permissions requises manquantes, ajoutées sans retirer les autres.
+- **Prompt modifié dans le dépôt** : signalé ; `--update-prompts` crée (ou réactive) sa version.
+- **Clés** : une seule par agent, émise seulement s'il n'en a aucune utilisable. En production,
+  elle s'affiche UNE fois : la copier dans un identifiant n8n propre à l'agent.
+- Refus si `MODE_SIMULATION` n'est pas `true`, si la base a des migrations en attente, ou si la
+  production n'est pas confirmée par son nom exact.
+- `setupProspector.ts` (un seul prospecteur, campagne active, production sans confirmation) est
+  conservé pour mémoire : ne pas l'utiliser pour ces deux agents.
 
 ## Déroulé d'une exécution (toutes les 10 minutes)
 
