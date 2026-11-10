@@ -17,3 +17,4 @@ export * from './agentRuns';
 export * from './externalActions';
 export * from './agentSchemas';
 export * from './campaigns';
+export * from './languageAssessment';

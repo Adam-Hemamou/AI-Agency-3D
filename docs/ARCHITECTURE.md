@@ -656,6 +656,40 @@ Chaque agent spécialisé a son rôle, son prompt système et ses paramètres ; 
 | `POST /api/agents/:id/prompts/:version/activate` | Rendre une version active                                          | Humain |
 | `GET /api/agent/profile`                         | Son rôle, ses paramètres et son prompt actif (pour n8n)            | Agent  |
 
+## 7 octies. Moteur d'évaluation linguistique (prospecteurs FR → EN et EN → FR)
+
+Phase 1 : moteur seul, sans route, sans base de données (`apps/server/src/language/`, contrat :
+`packages/shared/src/languageAssessment.ts`). Point d'entrée unique : `assessCreator()`.
+
+- **Rôles** : n8n orchestre (appels YouTube, Qwen3) ; le CRM calcule, de façon déterministe ; Qwen3 ne produit
+  **aucun** score, seulement l'analyse qualitative.
+- **Entrée** : réponses **brutes** de la YouTube Data API v3 (`channels.list`, `videos.list`,
+  `commentThreads.list`), transmises telles quelles par n8n ; seuls les champs utiles sont lus. Aucune logique
+  métier dans n8n.
+- **Trois notions séparées** : pays **déclaré** par la chaîne (fait, sans effet sur le score) ; langue du
+  **contenu** (vote sur les vidéos récentes : audio déclaré, langue détectée des titres et descriptions) ; langue de
+  l'**audience**, jamais connue par l'API publique : seulement des indices (langue des commentaires échantillonnés)
+  et des **hypothèses**, toujours accompagnées de la limite `audience_demographics_unavailable`.
+- **Niveaux de preuve** (`INSIGHT_KINDS`) : `fact` = champ de l'API lu tel quel (avec sa source) ;
+  `observation` = indice calculé ; `hypothesis` = conclusion sur l'audience. Un signal `audience_*` ne peut être
+  qu'une hypothèse (vérifié par le code et les tests).
+- **Prudence** : le détecteur (français et anglais seulement, sans dépendance) répond `unknown` dès que les données
+  manquent ; la langue du contenu est `unknown` sous 3 vidéos exploitables, en cas de conflit majoritaire entre
+  langue déclarée et langue détectée, ou sans langue dominante. Une direction n'est évaluée que si le contenu est
+  dans sa langue source (ou bilingue) avec une confiance au moins moyenne.
+- **Les deux directions sont toujours évaluées** : un créateur bilingue peut être pertinent dans les deux, sans
+  second dossier.
+- **Score sur 100, méthode versionnée** (`LANGUAGE_METHOD_V1`, `lang-v1`, statut `initial`) : pondérations
+  **initiales, à tester sur des données réelles** — commentaires dans la langue cible 30, ouverture visible vers
+  la langue cible (traductions, sous-titres) 25, contenu régulier dans la langue source 20, activité récente 15,
+  traction 10. Une donnée manquante **exclut** sa composante (jamais comptée zéro) ; `coverage` indique la part
+  mesurée ; sous 50 %, pas de score. Toute modification des pondérations ou des seuils crée une nouvelle version.
+- **Confiance** (`low`, `medium`, `high`) distincte du score : elle dépend de la langue du contenu, de la taille de
+  l'échantillon de commentaires et de la couverture. Un score faible peut être sûr.
+- **Commentaires** : leurs textes servent uniquement à compter des langues, en mémoire. Ils ne figurent jamais dans
+  le résultat ; une entrée invalide est refusée avec le seul chemin du champ fautif, jamais sa valeur. Ils ne doivent
+  pas non plus être journalisés ni enregistrés lorsque le moteur sera exposé par une route (phase suivante).
+
 ## 7 bis. API des missions
 
 Contrat (schémas Zod des requêtes et des réponses) : `packages/shared/src/missionApi.ts`.
