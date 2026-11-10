@@ -61,3 +61,39 @@ coordonnées sourcées, arrêt d'urgence. Le workflow ne décide de rien d'autre
   chaînes), sur 10 000 par jour.
 - Qwen3:8b sur le PC : environ 6 appels par jour et par campagne. Le PC doit être allumé
   (API, MySQL et Ollama y tournent).
+
+## Évaluation linguistique d'un créateur (CRM)
+
+Le CRM évalue la langue et le potentiel d'un créateur pour les **deux** directions (FR → EN et
+EN → FR) : `POST /api/agent/creators/assess`, permission `creators:assess` (rôle prospecteur).
+Calcul seul : rien n'est enregistré. Le workflow actuel ne l'appelle pas encore.
+
+n8n transmet les réponses de YouTube **telles quelles**, sans calcul :
+
+```json
+{
+  "observedAt": "<date du relevé, ISO 8601>",
+  "channel": "<items[0] de channels.list>",
+  "videos": "<items de videos.list>",
+  "comments": "<items de commentThreads.list>"
+}
+```
+
+Le corps d'une requête d'agent est limité à **256 Ko**. Pour rester en dessous, et ne faire
+transiter que le nécessaire (aucun nom, avatar ou identifiant d'auteur de commentaire), chaque
+appel YouTube demande seulement les champs utiles, avec le paramètre standard `fields` :
+
+| Appel                 | Paramètres recommandés                                                                                                                                                                                              |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `channels.list`       | `part=snippet,statistics,localizations` ; `fields=items(id,snippet(title,description,defaultLanguage,country),statistics(subscriberCount,hiddenSubscriberCount,videoCount,viewCount),localizations)`                |
+| `videos.list`         | `part=snippet,contentDetails,statistics,localizations` ; `fields=items(id,snippet(title,description,publishedAt,defaultLanguage,defaultAudioLanguage),contentDetails(caption),statistics(viewCount),localizations)` |
+| `commentThreads.list` | `part=snippet` ; `textFormat=plainText` ; `fields=items(snippet(videoId,topLevelComment(snippet(textOriginal))))`                                                                                                   |
+
+- **Échantillon** : 15 à 20 vidéos récentes par créateur (le CRM en accepte 50 au plus) et
+  100 commentaires au plus, répartis sur 2 ou 3 vidéos récentes.
+- `localizations` contient les titres et descriptions traduits : si une chaîne traduit beaucoup,
+  réduire le nombre de vidéos plutôt que de dépasser 256 Ko (réponse 413).
+- Coût : 1 unité par appel `channels.list`, `videos.list` (50 vidéos au plus) et
+  `commentThreads.list` (une vidéo par appel).
+- Les textes des commentaires ne servent qu'à compter des langues : le CRM ne les enregistre pas,
+  ne les renvoie pas et ne les écrit dans aucun journal.

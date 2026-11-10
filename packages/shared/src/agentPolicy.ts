@@ -41,6 +41,11 @@ export const AGENT_PERMISSIONS = [
   'contacts:submit',
   /** Mémoriser les chaînes écartées dans sa mission de recherche (motif, réévaluation). */
   'channels:reject',
+  /**
+   * Faire évaluer par le CRM la langue et le potentiel d'un créateur (FR → EN et EN → FR) à partir
+   * de données YouTube publiques. Calcul seul : rien n'est enregistré.
+   */
+  'creators:assess',
 ] as const;
 export type AgentPermission = (typeof AGENT_PERMISSIONS)[number];
 
@@ -66,6 +71,8 @@ export const AGENT_PERMISSION_LABELS: Record<AgentPermission, string> = {
   'contacts:submit':
     'Enregistrer des coordonnées publiques et sourcées à la création d’un prospect (sans les lire)',
   'channels:reject': 'Mémoriser les chaînes écartées pendant une recherche',
+  'creators:assess':
+    'Évaluer la langue et le potentiel d’un créateur (calcul, sans enregistrement)',
 };
 
 /**
@@ -109,6 +116,7 @@ export const AGENT_ROLE_PERMISSIONS: Record<AgentRole, readonly AgentPermission[
     'stages:advance',
     'contacts:submit',
     'channels:reject',
+    'creators:assess',
     ...WORK,
   ],
   /** Informations publiques et analyses. */

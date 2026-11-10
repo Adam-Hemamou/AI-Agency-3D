@@ -3,6 +3,8 @@ import {
   AGENT_PERMISSIONS,
   AGENT_PERMISSION_LABELS,
   AGENT_PRODUCTION_RULES,
+  AGENT_ROLE_PERMISSIONS,
+  AGENT_ROLES,
   canAgentMoveToStage,
   checkAgentProduction,
   isAgentMissionAction,
@@ -48,6 +50,22 @@ describe('permissions des agents', () => {
     expect(parse(['emails:send'])).toBe(false);
     expect(parse(['validations:approve'])).toBe(false);
     expect(parse(['prospects:read', 'analyses:write'])).toBe(true);
+  });
+
+  it('évaluation linguistique : réservée au rôle prospecteur, accordable explicitement', () => {
+    expect(AGENT_PERMISSIONS).toContain('creators:assess');
+    expect(AGENT_PERMISSION_LABELS['creators:assess']).toMatch(/sans enregistrement/);
+    expect(AGENT_ROLE_PERMISSIONS.prospector).toContain('creators:assess');
+    for (const role of AGENT_ROLES.filter((r) => r !== 'prospector')) {
+      expect(AGENT_ROLE_PERMISSIONS[role]).not.toContain('creators:assess');
+    }
+    expect(
+      createAgentRequestSchema.safeParse({
+        id: 'agent-a',
+        name: 'A',
+        permissions: ['creators:assess'],
+      }).success,
+    ).toBe(true);
   });
 });
 
