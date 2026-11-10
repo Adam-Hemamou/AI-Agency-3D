@@ -233,11 +233,16 @@ export function createRunService({
       agent.room === null
         ? Prisma.sql`m.agent_id = ${agent.id}`
         : Prisma.sql`(m.agent_id = ${agent.id} OR m.agent_id IS NULL)`;
+    // Mission d'une campagne désactivée : plus proposée (elle le redevient si la campagne est réactivée).
+    const campaignEnabled = Prisma.sql`NOT EXISTS (
+      SELECT 1 FROM prospecting_campaigns c WHERE c.id = m.campaign_id AND c.enabled = FALSE
+    )`;
     const startable = Prisma.sql`m.status = 'pending'
       AND m.attempt_count < m.max_attempts
       AND ${ownership}
       ${roomFilter}
-      AND ${noActiveRun}`;
+      AND ${noActiveRun}
+      AND ${campaignEnabled}`;
 
     for (const [condition, resume, order] of [
       [

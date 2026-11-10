@@ -3,6 +3,8 @@ import pkg from '../package.json' with { type: 'json' };
 import { createAgentProfileService } from './agents/agentProfileService.ts';
 import { createAgentService } from './agents/agentService.ts';
 import { createRunService } from './agents/runService.ts';
+import { startCampaignScheduler } from './campaigns/campaignScheduler.ts';
+import { createCampaignService } from './campaigns/campaignService.ts';
 import { createAgentControl } from './agents/agentControl.ts';
 import { createIdempotencyStore } from './agents/idempotency.ts';
 import { createQuotaService } from './agents/quotas.ts';
@@ -10,6 +12,13 @@ import { createApp } from './app.ts';
 import { createOwnerAuthService } from './auth/ownerAuth.ts';
 import { DEMO_SERVER_PORT, isDemoDataset, resolveDemoDatabaseUrl } from './config/demo.ts';
 import { loadConfig, type AppConfig } from './config/env.ts';
+import {
+  compareMigrations,
+  describeDatabase,
+  listRepositoryMigrations,
+  migrationProblem,
+  readAppliedMigrations,
+} from './db/migrationCheck.ts';
 import { createDatabaseProbe, createPrismaClient } from './db/prisma.ts';
 import { logger } from './lib/logger.ts';
 import { createMissionService, hasEffects } from './missions/missionService.ts';
@@ -41,8 +50,36 @@ try {
 }
 
 const prisma = createPrismaClient(config.DATABASE_URL);
+
+/**
+ * La base doit avoir reçu toutes les migrations du dépôt AVANT d'accepter une requête ou de lancer
+ * les tâches planifiées : sinon chaque requête touchant une table ou colonne nouvelle échoue.
+ * Base injoignable : l'API démarre quand même (état visible dans /api/health), comme avant.
+ */
+try {
+  const database = describeDatabase(config.DATABASE_URL);
+  const check = compareMigrations(listRepositoryMigrations(), await readAppliedMigrations(prisma));
+  if (check.unknown.length > 0) {
+    logger.warn(
+      `Base ${database} : migration(s) absente(s) du dépôt (code plus ancien que la base ?) : ${check.unknown.join(', ')}.`,
+    );
+  }
+  const problem = migrationProblem(check, database);
+  if (problem) {
+    logger.error(`Démarrage refusé.\n${problem}`);
+    await prisma.$disconnect();
+    process.exit(1);
+  }
+} catch (error) {
+  logger.warn(
+    'Migrations : vérification impossible (base injoignable ?), démarrage maintenu',
+    error,
+  );
+}
+
 const missions = createMissionService(prisma);
 const owner = createOwnerAuthService({ prisma });
+const campaigns = createCampaignService({ prisma, missions });
 const agentControl = createAgentControl({ prisma, envEnabled: config.AGENTS_ENABLED });
 try {
   // L'interrupteur enregistré s'applique avant d'accepter la moindre requête.
@@ -58,6 +95,7 @@ const app = createApp({
   agents: createAgentService({ prisma }),
   profiles: createAgentProfileService({ prisma }),
   runs: createRunService({ prisma, missions, control: agentControl }),
+  campaigns,
   idempotency: createIdempotencyStore(prisma),
   owner,
   quotas: createQuotaService({ prisma }),
@@ -146,10 +184,32 @@ const staleRecovery = demoMode
       onError: (error) => logger.error('Récupération des missions interrompues : échec', error),
     });
 
+/**
+ * Missions de recherche du jour : une par campagne active, attribuée à l'agent de la campagne.
+ * Désactivé en démonstration (aucune campagne réelle).
+ */
+const campaignScheduler = demoMode
+  ? null
+  : startCampaignScheduler({
+      generate: () => campaigns.generateDailyMissions(),
+      onCreated: (m) =>
+        logger.info(
+          `Campagne ${m.campaignId} : mission de recherche du ${m.day} créée (${m.missionId}).`,
+        ),
+      onCancelled: (m) =>
+        logger.info(
+          `Campagne ${m.campaignId} : mission du ${m.day} jamais prise, annulée (${m.missionId}).`,
+        ),
+      onSkipped: (c) =>
+        logger.warn(`Campagne ${c.campaignId} : aucune mission le ${c.day} (${c.reason}).`),
+      onError: (error) => logger.error('Missions des campagnes : échec de la création', error),
+    });
+
 const shutdown = createShutdown({
   // Requêtes en cours : SHUTDOWN_TIMEOUT_MS (5 s) au plus, puis connexions coupées.
   closeServers: () => {
     staleRecovery?.stop();
+    campaignScheduler?.stop();
     return closeServers([server, tailnetServer], {
       timeoutMs: SHUTDOWN_TIMEOUT_MS,
       onForced: () =>

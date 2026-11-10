@@ -4,6 +4,7 @@ import {
   AGENT_PERMISSIONS,
   claimRunResponseSchema,
   createMissionRequestSchema,
+  PIPELINE_MISSION_TYPES,
   issuedAgentKeyResponseSchema,
   runFailureResponseSchema,
   runHeartbeatResponseSchema,
@@ -248,12 +249,22 @@ describe('échec avec remise en attente', () => {
 
 describe('échec avec blocage', () => {
   it('la mission a déjà produit un effet : bloquée avec le code et le motif', async () => {
-    const prospector = await createAgent('agent-prospecteur', null);
-    const created = await request(app)
+    // Parcours réel : mission de recherche prise, puis prospect créé dans son cadre (un effet).
+    const prospector = await createAgent('agent-prospecteur', 'prospecting');
+    const search = createMissionRequestSchema.parse({
+      type: PIPELINE_MISSION_TYPES.search,
+      room: 'prospecting',
+    });
+    await missions.create(search, HUMAN_ACTOR);
+    const { run, mission, n8nExecutionId } = await claim(prospector);
+    expect(mission.type).toBe(PIPELINE_MISSION_TYPES.search);
+    later(60_000);
+    await request(app)
       .post('/api/agent/prospects')
       .set(auth(prospector))
       .set('Idempotency-Key', 'test-prospect-1')
       .send({
+        missionId: mission.id,
         creatorName: 'Léa',
         channelName: 'Chaîne de Léa',
         youtubeChannelId: 'UC-LEA',
@@ -264,16 +275,7 @@ describe('échec avec blocage', () => {
         },
       })
       .expect(201);
-    const prospectId = created.body.prospect.id as string;
     later(60_000);
-    const { run, mission, n8nExecutionId } = await claim(prospector); // sa mission de découverte
-    later(60_000);
-    await request(app)
-      .post(`/api/agent/prospects/${prospectId}/events`)
-      .set(auth(prospector))
-      .set('Idempotency-Key', 'test-activity-1')
-      .send({ title: 'Chaîne relevée', missionId: mission.id })
-      .expect(201);
 
     const body = runFailureResponseSchema.parse(
       (

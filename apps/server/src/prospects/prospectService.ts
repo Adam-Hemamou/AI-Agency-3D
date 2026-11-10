@@ -52,6 +52,7 @@ import { Prisma, type Prospect as ProspectRow } from '../generated/prisma/client
 import type { AppPrismaClient } from '../db/prisma.ts';
 import type { TransactionHook } from '../db/transactionHook.ts';
 import { assertHumanActor, isHumanActor } from '../auth/actors.ts';
+import { assertCampaignTargetIn, lockSearchMissionIn } from '../campaigns/searchMission.ts';
 import { AppError } from '../errors/AppError.ts';
 import { parseOrThrow } from '../lib/validate.ts';
 import {
@@ -115,6 +116,14 @@ const STAGE_MISSIONS: Partial<
   },
   followup: { type: PIPELINE_MISSION_TYPES.followup, room: 'followup' },
 };
+
+/**
+ * Salles où une mission exigeant une validation est soumise DIRECTEMENT à l'utilisateur : le système
+ * la démarre et la soumet dès sa création (aucun agent n'y travaille). « Mon bureau » : la revue du
+ * prospect après l'analyse. La salle de validation des e-mails n'y figure pas : sa mission est
+ * démarrée par un agent (rédaction ou vérification de l'e-mail), qui la soumet ensuite.
+ */
+const DIRECT_HUMAN_REVIEW_ROOMS: readonly string[] = ['director'];
 
 /** Statuts qu'un auteur non humain peut donner à un e-mail : jamais « validé » ni « envoyé ». */
 const NON_HUMAN_EMAIL_STATUSES: readonly ProductionStatus[] = ['draft', 'pending_review'];
@@ -333,7 +342,28 @@ export function createProspectService({
       prospectId: row.id,
       input: { prospectReference: row.reference, ...request.input },
     });
-    return (await engine.create(tx, input, actor)).mission;
+    const { mission } = await engine.create(tx, input, actor);
+    if (!input.requiresValidation || !DIRECT_HUMAN_REVIEW_ROOMS.includes(input.room)) {
+      return mission;
+    }
+    // Revue humaine directe : la mission attend la décision de l'utilisateur dès sa création.
+    // Le système la démarre et la soumet (aucun agent n'y travaille), dans la même transaction.
+    const latest = await tx.prospectAnalysis.findFirst({
+      where: { prospectId: row.id },
+      orderBy: { version: 'desc' },
+      select: { version: true, score: true },
+    });
+    await engine.applyAction(tx, mission.id, { action: 'start' }, SYSTEM);
+    const submitted = await engine.applyAction(
+      tx,
+      mission.id,
+      {
+        action: 'submit_for_validation',
+        output: latest ? { analysisVersion: latest.version, score: latest.score } : {},
+      },
+      SYSTEM,
+    );
+    return submitted.mission;
   }
 
   async function recordDecision(
@@ -786,16 +816,34 @@ export function createProspectService({
     // Écritures du pipeline (agents à venir, scénario de démonstration)
     // -----------------------------------------------------------------------
 
-    /** Crée le dossier d'un prospect découvert, avec sa mission de prospection. */
+    /**
+     * Crée le dossier d'un prospect découvert.
+     * - searchMissionId (agents) : le prospect est rattaché à la mission de recherche en cours de
+     *   l'agent (historique du dossier) ; AUCUNE mission n'est créée. Sans cela, les missions de
+     *   découverte, attribuées à l'agent, passeraient avant ses recherches à la prise suivante.
+     * - sinon (scénario de démonstration) : une mission de découverte est créée pour le dossier.
+     * Un agent doit toujours fournir sa mission de recherche, sauf mission de découverte explicite
+     * (démonstration uniquement : la route des agents ne la propose pas).
+     */
     async createProspect(
       request: CreateProspectRequest,
       actor: Actor,
       options: {
+        searchMissionId?: string;
         discoveryMission?: Omit<CreateMissionRequest, 'prospectId' | 'priority' | 'room' | 'type'>;
         hook?: TransactionHook;
       } = {},
     ) {
       const input = parseOrThrow(createProspectRequestSchema, request, 'Prospect');
+      const { searchMissionId } = options;
+      if (searchMissionId !== undefined && options.discoveryMission) {
+        throw new Error('createProspect : searchMissionId et discoveryMission sont exclusifs');
+      }
+      if (actor.type === 'agent' && searchMissionId === undefined && !options.discoveryMission) {
+        throw forbidden(
+          'Un agent ne crée un prospect que dans le cadre de sa mission de recherche en cours (missionId)',
+        );
+      }
       const create = () =>
         prisma.$transaction(async (tx) => {
           // Clé d'idempotence d'abord (écriture : n'ouvre pas encore la photo de la base),
@@ -803,6 +851,11 @@ export function createProspectService({
           await options.hook?.begin(tx);
           const now = clock();
           const reference = await reserveReferenceIn(tx, now);
+          // Mission de recherche de l'agent : vérifiée, verrouillée, campagne active, objectif quotidien.
+          if (searchMissionId !== undefined) {
+            const search = await lockSearchMissionIn(tx, searchMissionId, actor);
+            await assertCampaignTargetIn(tx, search);
+          }
           // Doublon : même identifiant YouTube, même nom de chaîne ou même adresse de chaîne.
           const duplicates = await findDuplicatesIn(tx, {
             youtubeChannelId: input.youtubeChannelId ?? undefined,
@@ -819,6 +872,7 @@ export function createProspectService({
               viewCount: input.viewCount === null ? null : BigInt(input.viewCount),
               statsUpdatedAt: input.statsUpdatedAt ? new Date(input.statsUpdatedAt) : null,
               discovery: input.discovery as Prisma.InputJsonObject,
+              discoveryMissionId: searchMissionId ?? null,
               stage: 'prospecting',
               discoveredAt: now,
               lastActivityAt: now,
@@ -826,23 +880,27 @@ export function createProspectService({
               updatedAt: now,
             },
           });
-          const mission = await createMissionIn(
-            tx,
-            row,
-            {
-              type: PIPELINE_MISSION_TYPES.discover,
-              room: 'prospecting',
-              agentId: actor.type === 'agent' ? actor.id : null,
-              ...options.discoveryMission,
-            },
-            actor,
-          );
+          const missionId =
+            searchMissionId ??
+            (
+              await createMissionIn(
+                tx,
+                row,
+                {
+                  type: PIPELINE_MISSION_TYPES.discover,
+                  room: 'prospecting',
+                  agentId: actor.type === 'agent' ? actor.id : null,
+                  ...options.discoveryMission,
+                },
+                actor,
+              )
+            ).id;
           await addEvent(tx, row.id, actor, {
             type: 'discovered',
             title: 'Prospect découvert',
             room: 'prospecting',
             details: input.discovery.reason,
-            missionId: mission.id,
+            missionId,
             payload: { source: input.discovery.source },
           });
           await options.hook?.end(tx, { type: 'prospect', id: row.id });

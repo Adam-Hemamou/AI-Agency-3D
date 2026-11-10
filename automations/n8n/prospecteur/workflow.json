@@ -1,0 +1,844 @@
+{
+  "name": "Prospecteur YouTube",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Paris",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
+  },
+  "nodes": [
+    {
+      "id": "c0a80001-0000-4000-8000-000000000001",
+      "name": "Toutes les 10 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 300],
+      "parameters": {
+        "rule": { "interval": [{ "field": "minutes", "minutesInterval": 10 }] }
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000002",
+      "name": "Configuration",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [220, 300],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-1",
+              "name": "crmUrl",
+              "value": "http://ADRESSE_TAILSCALE_DU_PC:3001",
+              "type": "string"
+            },
+            {
+              "id": "cfg-2",
+              "name": "ollamaUrl",
+              "value": "http://ADRESSE_TAILSCALE_DU_PC:11434",
+              "type": "string"
+            },
+            { "id": "cfg-3", "name": "maxRecherches", "value": 3, "type": "number" },
+            { "id": "cfg-4", "name": "maxCandidats", "value": 6, "type": "number" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000003",
+      "name": "Capacités",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Configuration').first().json.crmUrl }}/api/agent/capabilities",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "credentials": { "httpHeaderAuth": { "id": "", "name": "CRM – agent-prospecteur" } }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000004",
+      "name": "Lecture publique autorisée ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "if-1",
+              "leftValue": "={{ $json.externalActions.public_read.allowed === true }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000005",
+      "name": "Prendre une mission",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuration').first().json.crmUrl }}/api/agent/runs/claim",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ n8nExecutionId: String($execution.id) }) }}",
+        "options": { "response": { "response": { "fullResponse": true, "neverError": true } } }
+      },
+      "credentials": { "httpHeaderAuth": { "id": "", "name": "CRM – agent-prospecteur" } }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000006",
+      "name": "Mission obtenue ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1100, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "if-2",
+              "leftValue": "={{ [200, 201].includes($json.statusCode) && !!$json.body && !!$json.body.run }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000007",
+      "name": "Profil agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Configuration').first().json.crmUrl }}/api/agent/profile",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "credentials": { "httpHeaderAuth": { "id": "", "name": "CRM – agent-prospecteur" } }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000008",
+      "name": "Critères de la campagne",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Configuration').first().json.crmUrl }}/api/agent/missions/{{ $('Prendre une mission').first().json.body.mission.id }}/campaign",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "credentials": { "httpHeaderAuth": { "id": "", "name": "CRM – agent-prospecteur" } }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000009",
+      "name": "Plan de recherche",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, 300],
+      "parameters": {
+        "jsCode": "const cfg = $('Configuration').first().json;\nconst claim = $('Prendre une mission').first().json.body;\nconst ctx = $('Critères de la campagne').first().json;\nconst c = ctx.campaign;\nconst base = { missionId: claim.mission.id, runId: claim.run.id };\nif (!c.enabled || ctx.progress.remaining <= 0) {\n  const fin = c.enabled ? 'objectif du jour déjà atteint' : 'campagne désactivée';\n  return [{ json: { ...base, recherches: [], fin } }];\n}\n// Mots-clés différents chaque jour (rotation), dans la limite du quota YouTube (100 unités par recherche).\nconst n = Math.min(cfg.maxRecherches, c.keywords.length);\nconst debut = Number(ctx.mission.day.replaceAll('-', '')) % c.keywords.length;\nconst motsCles = Array.from({ length: n }, (_, i) => c.keywords[(debut + i) % c.keywords.length]);\nconst depuis = new Date(Date.now() - c.maxDaysSinceLastVideo * 86400000).toISOString().replace(/\\.\\d{3}Z$/, 'Z');\nconst recherches = motsCles.map((motCle) => {\n  const query = { part: 'snippet', type: 'video', q: motCle, maxResults: 50, order: 'relevance', publishedAfter: depuis };\n  if (c.languages.length) query.relevanceLanguage = c.languages[0];\n  if (c.countries.length) query.regionCode = c.countries[0];\n  return { motCle, query };\n});\nreturn [{ json: { ...base, recherches, fin: null } }];"
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000010",
+      "name": "Recherches à faire ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1980, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "if-3",
+              "leftValue": "={{ $json.recherches.length > 0 }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000011",
+      "name": "Une recherche par mot-clé",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 200],
+      "parameters": {
+        "jsCode": "return $input.first().json.recherches.map((r) => ({ json: r }));"
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000012",
+      "name": "YouTube – recherche de vidéos",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2420, 200],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/youtube/v3/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.query) }}",
+        "options": { "response": { "response": { "fullResponse": true, "neverError": true } } }
+      },
+      "credentials": { "httpQueryAuth": { "id": "", "name": "YouTube Data API" } }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000013",
+      "name": "Chaînes trouvées",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2640, 200],
+      "parameters": {
+        "jsCode": "const plan = $('Plan de recherche').first().json;\nconst recherches = $('Une recherche par mot-clé').all();\nconst chaines = {};\nconst erreurs = [];\n$input.all().forEach((item, i) => {\n  const r = item.json;\n  const motCle = recherches[i] ? recherches[i].json.motCle : null;\n  if (r.error || !r.statusCode || r.statusCode >= 400) {\n    erreurs.push(r.body?.error?.message ?? r.error?.message ?? String(r.error ?? r.statusCode));\n    return;\n  }\n  for (const v of r.body?.items ?? []) {\n    const id = v.snippet?.channelId;\n    if (!id) continue;\n    const prec = chaines[id];\n    if (!prec || v.snippet.publishedAt > prec.derniereVideo) {\n      chaines[id] = { derniereVideo: v.snippet.publishedAt, titreVideo: v.snippet.title, motCle };\n    }\n  }\n});\nif (erreurs.length === recherches.length) {\n  return [{ json: { ...plan, ids: [], chaines: {}, echec: { code: 'WORKFLOW_ERROR', message: 'YouTube (recherche) : ' + erreurs[0] } } }];\n}\nconst ids = Object.keys(chaines).slice(0, 50);\nreturn [{ json: { ...plan, ids, chaines, erreursYoutube: erreurs, echec: null } }];"
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000014",
+      "name": "Recherche YouTube réussie ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2860, 200],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "if-4",
+              "leftValue": "={{ !$json.echec }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000015",
+      "name": "Des chaînes trouvées ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [3080, 100],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "if-5",
+              "leftValue": "={{ $json.ids.length > 0 }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000016",
+      "name": "CRM – chaînes déjà connues",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3300, 0],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Configuration').first().json.crmUrl }}/api/agent/channels/lookup",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "specifyQuery": "keypair",
+        "queryParameters": {
+          "parameters": [
+            { "name": "missionId", "value": "={{ $json.missionId }}" },
+            { "name": "channelIds", "value": "={{ $json.ids.join(',') }}" }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": { "httpHeaderAuth": { "id": "", "name": "CRM – agent-prospecteur" } }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000017",
+      "name": "Nouvelles chaînes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3520, 0],
+      "parameters": {
+        "jsCode": "const prec = $('Chaînes trouvées').first().json;\nconst etat = $input.first().json.items ?? [];\nconst nouvelles = etat.filter((c) => c.status === 'new').map((c) => c.channelId);\nreturn [{ json: { ...prec, nouvelles, dejaConnues: etat.length - nouvelles.length } }];"
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000018",
+      "name": "Des chaînes nouvelles ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [3740, 0],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "if-6",
+              "leftValue": "={{ $json.nouvelles.length > 0 }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000019",
+      "name": "YouTube – détails des chaînes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3960, -100],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/youtube/v3/channels",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify({ part: 'snippet,statistics,status', id: $json.nouvelles.join(','), maxResults: 50 }) }}",
+        "options": { "response": { "response": { "fullResponse": true, "neverError": true } } }
+      },
+      "credentials": { "httpQueryAuth": { "id": "", "name": "YouTube Data API" } }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000020",
+      "name": "Filtrer et préparer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4180, -100],
+      "parameters": {
+        "jsCode": "const prec = $('Nouvelles chaînes').first().json;\nconst camp = $('Critères de la campagne').first().json.campaign;\nconst cfg = $('Configuration').first().json;\nconst r = $input.first().json;\nif (r.error || !r.statusCode || r.statusCode >= 400) {\n  const detail = r.body?.error?.message ?? r.error?.message ?? String(r.error ?? r.statusCode);\n  return [{ json: { ...prec, echec: { code: 'WORKFLOW_ERROR', message: 'YouTube (chaînes) : ' + detail } } }];\n}\nconst EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i;\nconst rejetsFiltre = [];\nconst candidats = [];\nfor (const ch of r.body?.items ?? []) {\n  const s = ch.statistics ?? {};\n  const sn = ch.snippet ?? {};\n  const titre = (sn.title || ch.id).slice(0, 120);\n  const ecarter = (reasonCode, reason) => rejetsFiltre.push({ channelId: ch.id, channelTitle: titre, reasonCode, reason });\n  const abonnes = s.hiddenSubscriberCount ? null : Number(s.subscriberCount ?? 0);\n  if (ch.status?.madeForKids) { ecarter('made_for_kids', 'Chaîne destinée aux enfants'); continue; }\n  if (abonnes === null) { ecarter('insufficient_data', 'Nombre d’abonnés masqué'); continue; }\n  if (camp.minSubscribers !== null && abonnes < camp.minSubscribers) { ecarter('audience_too_small', abonnes + ' abonnés'); continue; }\n  if (camp.maxSubscribers !== null && abonnes > camp.maxSubscribers) { ecarter('audience_too_large', abonnes + ' abonnés'); continue; }\n  if (camp.countries.length && sn.country && !camp.countries.includes(sn.country)) { ecarter('country_mismatch', 'Pays déclaré : ' + sn.country); continue; }\n  const email = (sn.description ?? '').match(EMAIL)?.[0] ?? null;\n  candidats.push({\n    channelId: ch.id, titre, handle: sn.customUrl || null, description: (sn.description ?? '').slice(0, 4000),\n    pays: sn.country ?? null, langueParDefaut: sn.defaultLanguage ?? null, abonnes,\n    vues: Number(s.viewCount ?? 0), videos: Number(s.videoCount ?? 0),\n    avatar: sn.thumbnails?.default?.url ?? null, email, ...prec.chaines[ch.id],\n  });\n}\nreturn [{ json: { ...prec, rejetsFiltre, candidats: candidats.slice(0, cfg.maxCandidats), echec: null } }];"
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000021",
+      "name": "Filtrage réussi ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [4400, -100],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "if-7",
+              "leftValue": "={{ !$json.echec }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000022",
+      "name": "Signal de vie",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [4620, -200],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuration').first().json.crmUrl }}/api/agent/runs/{{ $('Prendre une mission').first().json.body.run.id }}/heartbeat",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ n8nExecutionId: String($execution.id) }) }}",
+        "options": {}
+      },
+      "credentials": { "httpHeaderAuth": { "id": "", "name": "CRM – agent-prospecteur" } }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000023",
+      "name": "Un candidat par élément",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4840, -200],
+      "parameters": {
+        "jsCode": "const f = $('Filtrer et préparer').first().json;\n// Toujours au moins un élément : la boucle s'exécute et le bilan est atteint même sans candidat.\nreturn f.candidats.length ? f.candidats.map((c) => ({ json: c })) : [{ json: { aucun: true } }];"
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000024",
+      "name": "Pour chaque candidat",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [5060, -200],
+      "parameters": { "batchSize": 1, "options": {} }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000025",
+      "name": "Candidat réel ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [5280, -100],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "if-8",
+              "leftValue": "={{ !$json.aucun }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000026",
+      "name": "Requête Qwen3",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [5500, -200],
+      "parameters": {
+        "jsCode": "const P = $('Profil agent').first().json;\nconst camp = $('Critères de la campagne').first().json.campaign;\nconst c = $input.first().json;\nconst s = P.settings;\nconst SCHEMA = {\n  type: 'object',\n  properties: {\n    retenir: { type: 'boolean' },\n    code_rejet: { type: 'string', enum: ['aucun', 'off_target', 'no_dubbing_potential', 'language_mismatch', 'insufficient_data', 'other'] },\n    motif: { type: 'string' },\n    adequation: { type: 'string' },\n    interet: { type: 'string' },\n    observation: { type: 'string' },\n    informations_manquantes: { type: 'array', items: { type: 'string' } },\n  },\n  required: ['retenir', 'code_rejet', 'motif', 'adequation', 'interet', 'observation', 'informations_manquantes'],\n};\nconst donnees = {\n  campagne: { thematiques: camp.themes, motsCles: camp.keywords, langues: camp.languages, pays: camp.countries },\n  chaine: {\n    titre: c.titre, identifiant: c.handle, pays: c.pays, langueParDefaut: c.langueParDefaut,\n    abonnes: c.abonnes, vues: c.vues, videos: c.videos,\n    derniereVideo: c.derniereVideo, titreDerniereVideo: c.titreVideo, description: c.description,\n  },\n};\nconst body = {\n  model: s.model, stream: false, think: s.think, format: SCHEMA,\n  options: { temperature: s.temperature, top_p: s.topP, top_k: s.topK, num_ctx: s.numCtx, num_predict: s.numPredict },\n  messages: [\n    { role: 'system', content: P.prompt.systemPrompt },\n    { role: 'user', content: JSON.stringify(donnees) },\n  ],\n};\nreturn [{ json: { candidat: c, body, timeoutMs: s.timeoutSeconds * 1000 } }];"
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000027",
+      "name": "Qwen3 – qualification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [5720, -200],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuration').first().json.ollamaUrl }}/api/chat",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": "={{ $json.timeoutMs }}",
+          "response": { "response": { "neverError": true } }
+        }
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000028",
+      "name": "Décision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [5940, -200],
+      "parameters": {
+        "jsCode": "const req = $('Requête Qwen3').first().json;\nconst c = req.candidat;\nconst plan = $('Plan de recherche').first().json;\nconst camp = $('Critères de la campagne').first().json.campaign;\nconst r = $input.first().json;\nconst CODES = ['off_target', 'no_dubbing_potential', 'language_mismatch', 'insufficient_data', 'other'];\nconst erreur = r.error ? (typeof r.error === 'string' ? r.error : (r.error.message ?? 'erreur inconnue')) : null;\nif (erreur || !r.message) {\n  return [{ json: { action: 'erreur_llm', channelId: c.channelId, message: erreur ?? 'réponse vide' } }];\n}\nconst tokens = { prompt: r.prompt_eval_count ?? 0, sortie: r.eval_count ?? 0, ms: Math.round((r.total_duration ?? 0) / 1e6) };\nlet q = null;\ntry { q = JSON.parse(r.message.content); } catch (e) { q = null; }\nconst texte = (v) => typeof v === 'string' && v.trim().length > 0;\nif (!q || typeof q.retenir !== 'boolean' || ![q.motif, q.adequation, q.interet, q.observation].every(texte)) {\n  return [{ json: { action: 'invalide', channelId: c.channelId, tokens, brut: String(r.message.content ?? '').slice(0, 1000) } }];\n}\nif (!q.retenir) {\n  const reasonCode = CODES.includes(q.code_rejet) ? q.code_rejet : 'other';\n  return [{ json: { action: 'rejeter', channelId: c.channelId, tokens, rejet: { channelId: c.channelId, channelTitle: c.titre, reasonCode, reason: q.motif.trim().slice(0, 500) } } }];\n}\nconst manquantes = Array.isArray(q.informations_manquantes) ? q.informations_manquantes.filter(texte).slice(0, 10) : [];\nconst prospect = {\n  missionId: plan.missionId,\n  creatorName: c.titre,\n  channelName: c.titre,\n  youtubeChannelId: c.channelId,\n  channelHandle: c.handle,\n  channelUrl: 'https://www.youtube.com/channel/' + c.channelId,\n  avatarUrl: c.avatar,\n  description: c.description || null,\n  country: c.pays,\n  subscriberCount: c.abonnes,\n  viewCount: c.vues,\n  videoCount: c.videos,\n  statsSource: 'YouTube Data API v3 (channels.list)',\n  statsUpdatedAt: new Date().toISOString(),\n  contactEmail: c.email,\n  contactSource: c.email ? 'https://www.youtube.com/channel/' + c.channelId + '/about' : null,\n  discovery: {\n    source: 'YouTube Data API v3 (search.list)',\n    reason: q.motif.trim(),\n    keywords: c.motCle ? [c.motCle] : [],\n    criteria: camp.themes,\n    qualification: {\n      targetFit: q.adequation.trim(),\n      potentialInterest: q.interet.trim(),\n      firstObservation: q.observation.trim(),\n      missingInfo: manquantes,\n      transferReason: q.motif.trim(),\n    },\n  },\n};\nreturn [{ json: { action: 'creer', channelId: c.channelId, tokens, prospect } }];"
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000029",
+      "name": "Créer le prospect ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [6160, -200],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "if-9",
+              "leftValue": "={{ $json.action === 'creer' }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000030",
+      "name": "CRM – créer le prospect",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [6380, -300],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuration').first().json.crmUrl }}/api/agent/prospects",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Idempotency-Key",
+              "value": "=prospect-{{ $execution.id }}-{{ $json.channelId }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.prospect) }}",
+        "options": { "response": { "response": { "fullResponse": true, "neverError": true } } }
+      },
+      "credentials": { "httpHeaderAuth": { "id": "", "name": "CRM – agent-prospecteur" } }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000031",
+      "name": "Prospect créé ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [6600, -300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "if-10",
+              "leftValue": "={{ $json.statusCode === 201 }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000032",
+      "name": "CRM – passage en analyse",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [6820, -400],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuration').first().json.crmUrl }}/api/agent/prospects/{{ $json.body.prospect.id }}/stage",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Idempotency-Key",
+              "value": "=analyse-{{ $execution.id }}-{{ $json.body.prospect.id }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ to: 'analysis', details: 'Qualifié par le Prospecteur (Qwen3) : transmis à l’Analyste' }) }}",
+        "options": { "response": { "response": { "fullResponse": true, "neverError": true } } }
+      },
+      "credentials": { "httpHeaderAuth": { "id": "", "name": "CRM – agent-prospecteur" } }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000033",
+      "name": "Résultat du candidat",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [7040, -300],
+      "parameters": {
+        "jsCode": "const d = $('Décision').first().json;\nconst creation = $('CRM – créer le prospect').first().json;\nif (creation.statusCode === 201) {\n  const passage = $input.first().json;\n  return [{ json: { action: 'cree', channelId: d.channelId, reference: creation.body.prospect.reference, enAnalyse: passage.statusCode === 200, tokens: d.tokens } }];\n}\nconst code = creation.body?.error?.code;\nconst action = code === 'ALREADY_EXISTS' ? 'doublon'\n  : code === 'CAMPAIGN_TARGET_REACHED' ? 'objectif_atteint'\n  : code === 'QUOTA_EXCEEDED' ? 'quota_atteint'\n  : 'refus_crm';\nconst message = creation.body?.error?.message ?? creation.error?.message ?? null;\nreturn [{ json: { action, channelId: d.channelId, message, tokens: d.tokens } }];"
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000034",
+      "name": "Bilan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [5280, -500],
+      "parameters": {
+        "jsCode": "const plan = $('Plan de recherche').first().json;\nconst f = $('Filtrer et préparer').first().json;\nconst res = $input.all().map((i) => i.json).filter((j) => !j.aucun);\nconst compter = (a) => res.filter((r) => r.action === a).length;\nconst rejets = [...f.rejetsFiltre, ...res.filter((r) => r.action === 'rejeter').map((r) => r.rejet)].slice(0, 50);\nconst erreursLlm = res.filter((r) => r.action === 'erreur_llm');\nconst tokens = res.reduce((t, r) => ({\n  prompt: t.prompt + (r.tokens?.prompt ?? 0), sortie: t.sortie + (r.tokens?.sortie ?? 0), ms: t.ms + (r.tokens?.ms ?? 0),\n}), { prompt: 0, sortie: 0, ms: 0 });\nconst stats = {\n  recherches: plan.recherches.length,\n  chainesTrouvees: f.ids.length,\n  dejaConnues: f.dejaConnues,\n  nouvelles: f.nouvelles.length,\n  ecarteesParFiltre: f.rejetsFiltre.length,\n  evalueesParQwen3: res.length,\n  prospectsCrees: compter('cree'),\n  references: res.filter((r) => r.action === 'cree').map((r) => r.reference),\n  ecarteesParQwen3: compter('rejeter'),\n  doublons: compter('doublon'),\n  objectifAtteint: compter('objectif_atteint') > 0,\n  quotaGlobalAtteint: compter('quota_atteint') > 0,\n  reponsesInvalides: compter('invalide'),\n  erreursQwen3: erreursLlm.length,\n  refusCrm: compter('refus_crm'),\n  tokens,\n};\n// Aucune qualification possible (Ollama injoignable) : échec, le CRM décide de la suite.\nconst echec = res.length > 0 && erreursLlm.length === res.length\n  ? { code: 'LLM_UNAVAILABLE', message: 'Qwen3 / Ollama : ' + erreursLlm[0].message }\n  : null;\nreturn [{ json: { ...plan, rejets, stats, echec } }];"
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000035",
+      "name": "Bilan sans échec ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [5500, -600],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "if-11",
+              "leftValue": "={{ !$json.echec }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000036",
+      "name": "Des chaînes écartées ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [5720, -700],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "if-12",
+              "leftValue": "={{ $json.rejets.length > 0 }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000037",
+      "name": "CRM – chaînes écartées",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [5940, -800],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuration').first().json.crmUrl }}/api/agent/channels/rejections",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [{ "name": "Idempotency-Key", "value": "=rejets-{{ $execution.id }}" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ missionId: $json.missionId, items: $json.rejets }) }}",
+        "options": { "response": { "response": { "fullResponse": true, "neverError": true } } }
+      },
+      "credentials": { "httpHeaderAuth": { "id": "", "name": "CRM – agent-prospecteur" } }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000038",
+      "name": "Terminer la mission",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [6160, -700],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuration').first().json.crmUrl }}/api/agent/missions/{{ $('Plan de recherche').first().json.missionId }}/transitions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [{ "name": "Idempotency-Key", "value": "=terminer-{{ $execution.id }}" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ action: 'complete', output: $('Bilan').isExecuted ? $('Bilan').first().json.stats : { fin: $json.fin ?? ($json.nouvelles ? 'toutes les chaînes trouvées sont déjà connues' : 'aucune chaîne trouvée') } }) }}",
+        "options": {}
+      },
+      "credentials": { "httpHeaderAuth": { "id": "", "name": "CRM – agent-prospecteur" } }
+    },
+    {
+      "id": "c0a80001-0000-4000-8000-000000000039",
+      "name": "Signaler l'échec",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [5500, 400],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuration').first().json.crmUrl }}/api/agent/runs/{{ $('Prendre une mission').first().json.body.run.id }}/failure",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ n8nExecutionId: String($execution.id), code: $json.echec.code, message: String($json.echec.message).slice(0, 2000) }) }}",
+        "options": {}
+      },
+      "credentials": { "httpHeaderAuth": { "id": "", "name": "CRM – agent-prospecteur" } }
+    }
+  ],
+  "connections": {
+    "Toutes les 10 minutes": {
+      "main": [[{ "node": "Configuration", "type": "main", "index": 0 }]]
+    },
+    "Configuration": { "main": [[{ "node": "Capacités", "type": "main", "index": 0 }]] },
+    "Capacités": {
+      "main": [[{ "node": "Lecture publique autorisée ?", "type": "main", "index": 0 }]]
+    },
+    "Lecture publique autorisée ?": {
+      "main": [[{ "node": "Prendre une mission", "type": "main", "index": 0 }], []]
+    },
+    "Prendre une mission": {
+      "main": [[{ "node": "Mission obtenue ?", "type": "main", "index": 0 }]]
+    },
+    "Mission obtenue ?": { "main": [[{ "node": "Profil agent", "type": "main", "index": 0 }], []] },
+    "Profil agent": {
+      "main": [[{ "node": "Critères de la campagne", "type": "main", "index": 0 }]]
+    },
+    "Critères de la campagne": {
+      "main": [[{ "node": "Plan de recherche", "type": "main", "index": 0 }]]
+    },
+    "Plan de recherche": {
+      "main": [[{ "node": "Recherches à faire ?", "type": "main", "index": 0 }]]
+    },
+    "Recherches à faire ?": {
+      "main": [
+        [{ "node": "Une recherche par mot-clé", "type": "main", "index": 0 }],
+        [{ "node": "Terminer la mission", "type": "main", "index": 0 }]
+      ]
+    },
+    "Une recherche par mot-clé": {
+      "main": [[{ "node": "YouTube – recherche de vidéos", "type": "main", "index": 0 }]]
+    },
+    "YouTube – recherche de vidéos": {
+      "main": [[{ "node": "Chaînes trouvées", "type": "main", "index": 0 }]]
+    },
+    "Chaînes trouvées": {
+      "main": [[{ "node": "Recherche YouTube réussie ?", "type": "main", "index": 0 }]]
+    },
+    "Recherche YouTube réussie ?": {
+      "main": [
+        [{ "node": "Des chaînes trouvées ?", "type": "main", "index": 0 }],
+        [{ "node": "Signaler l'échec", "type": "main", "index": 0 }]
+      ]
+    },
+    "Des chaînes trouvées ?": {
+      "main": [
+        [{ "node": "CRM – chaînes déjà connues", "type": "main", "index": 0 }],
+        [{ "node": "Terminer la mission", "type": "main", "index": 0 }]
+      ]
+    },
+    "CRM – chaînes déjà connues": {
+      "main": [[{ "node": "Nouvelles chaînes", "type": "main", "index": 0 }]]
+    },
+    "Nouvelles chaînes": {
+      "main": [[{ "node": "Des chaînes nouvelles ?", "type": "main", "index": 0 }]]
+    },
+    "Des chaînes nouvelles ?": {
+      "main": [
+        [{ "node": "YouTube – détails des chaînes", "type": "main", "index": 0 }],
+        [{ "node": "Terminer la mission", "type": "main", "index": 0 }]
+      ]
+    },
+    "YouTube – détails des chaînes": {
+      "main": [[{ "node": "Filtrer et préparer", "type": "main", "index": 0 }]]
+    },
+    "Filtrer et préparer": {
+      "main": [[{ "node": "Filtrage réussi ?", "type": "main", "index": 0 }]]
+    },
+    "Filtrage réussi ?": {
+      "main": [
+        [{ "node": "Signal de vie", "type": "main", "index": 0 }],
+        [{ "node": "Signaler l'échec", "type": "main", "index": 0 }]
+      ]
+    },
+    "Signal de vie": {
+      "main": [[{ "node": "Un candidat par élément", "type": "main", "index": 0 }]]
+    },
+    "Un candidat par élément": {
+      "main": [[{ "node": "Pour chaque candidat", "type": "main", "index": 0 }]]
+    },
+    "Pour chaque candidat": {
+      "main": [
+        [{ "node": "Bilan", "type": "main", "index": 0 }],
+        [{ "node": "Candidat réel ?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Candidat réel ?": {
+      "main": [
+        [{ "node": "Requête Qwen3", "type": "main", "index": 0 }],
+        [{ "node": "Pour chaque candidat", "type": "main", "index": 0 }]
+      ]
+    },
+    "Requête Qwen3": {
+      "main": [[{ "node": "Qwen3 – qualification", "type": "main", "index": 0 }]]
+    },
+    "Qwen3 – qualification": { "main": [[{ "node": "Décision", "type": "main", "index": 0 }]] },
+    "Décision": { "main": [[{ "node": "Créer le prospect ?", "type": "main", "index": 0 }]] },
+    "Créer le prospect ?": {
+      "main": [
+        [{ "node": "CRM – créer le prospect", "type": "main", "index": 0 }],
+        [{ "node": "Pour chaque candidat", "type": "main", "index": 0 }]
+      ]
+    },
+    "CRM – créer le prospect": {
+      "main": [[{ "node": "Prospect créé ?", "type": "main", "index": 0 }]]
+    },
+    "Prospect créé ?": {
+      "main": [
+        [{ "node": "CRM – passage en analyse", "type": "main", "index": 0 }],
+        [{ "node": "Résultat du candidat", "type": "main", "index": 0 }]
+      ]
+    },
+    "CRM – passage en analyse": {
+      "main": [[{ "node": "Résultat du candidat", "type": "main", "index": 0 }]]
+    },
+    "Résultat du candidat": {
+      "main": [[{ "node": "Pour chaque candidat", "type": "main", "index": 0 }]]
+    },
+    "Bilan": { "main": [[{ "node": "Bilan sans échec ?", "type": "main", "index": 0 }]] },
+    "Bilan sans échec ?": {
+      "main": [
+        [{ "node": "Des chaînes écartées ?", "type": "main", "index": 0 }],
+        [{ "node": "Signaler l'échec", "type": "main", "index": 0 }]
+      ]
+    },
+    "Des chaînes écartées ?": {
+      "main": [
+        [{ "node": "CRM – chaînes écartées", "type": "main", "index": 0 }],
+        [{ "node": "Terminer la mission", "type": "main", "index": 0 }]
+      ]
+    },
+    "CRM – chaînes écartées": {
+      "main": [[{ "node": "Terminer la mission", "type": "main", "index": 0 }]]
+    }
+  }
+}

@@ -18,10 +18,17 @@ import {
   checkAgentProduction,
   missionListQuerySchema,
   createAnalysisRequestSchema,
+  agentCreateProspectRequestSchema,
+  channelLookupQuerySchema,
+  channelRejectionsRequestSchema,
+  agentJsonSchema,
+  agentJsonSchemaList,
+  isAgentJsonSchemaName,
+  externalActionPolicy,
+  PUBLIC_DATA_SOURCES,
+  type AgentCapabilitiesResponse,
   createProductionRequestSchema,
-  createProspectRequestSchema,
   enrichProspectRequestSchema,
-  hasChannelIdentifier,
   missionTransitionRequestSchema,
   prospectLookupQuerySchema,
   type AgentMissionScope,
@@ -36,6 +43,7 @@ import type { AuthenticatedAgent } from '../agents/agentService.ts';
 import type { AgentControl } from '../agents/agentControl.ts';
 import type { AgentProfileService } from '../agents/agentProfileService.ts';
 import type { RunService } from '../agents/runService.ts';
+import type { CampaignService } from '../campaigns/campaignService.ts';
 import { toAgentDossier } from '../agents/agentView.ts';
 import type { QuotaService } from '../agents/quotas.ts';
 import {
@@ -72,6 +80,10 @@ export interface AgentApiDeps {
   profiles?: AgentProfileService;
   /** Exécutions (POST /runs/claim). Facultatif : sans lui, les routes n'existent pas (404). */
   runs?: RunService;
+  /** MODE_SIMULATION : ce que les agents peuvent faire à l'extérieur (GET /capabilities). */
+  simulationMode: boolean;
+  /** Campagnes et mémoire des chaînes. Facultatif : sans lui, ces routes n'existent pas (404). */
+  campaigns?: CampaignService;
 }
 
 function forbidden(message: string): AppError {
@@ -86,6 +98,31 @@ function agentOf(res: Response): AuthenticatedAgent {
     );
   }
   return agent;
+}
+
+/** Coordonnées professionnelles d'un prospect : protégées par prospects:read_contact. */
+const CONTACT_FIELDS = ['contactEmail', 'contactName', 'contactSource'] as const;
+
+/**
+ * Écriture de coordonnées par un agent :
+ * - à la CRÉATION d'un prospect : prospects:read_contact, ou contacts:submit (coordonnées publiques
+ *   et sourcées, sans accès aux coordonnées existantes ; la source est l'adresse de la page publique,
+ *   exigée par agentCreateProspectRequestSchema) ;
+ * - pour MODIFIER ou effacer celles d'un dossier existant : prospects:read_contact uniquement (on ne
+ *   modifie pas ce qu'on ne peut pas lire).
+ */
+function assertCanWriteContact(
+  agent: AuthenticatedAgent,
+  writesContact: boolean,
+  on: 'create' | 'update',
+) {
+  if (!writesContact || agent.permissions.has('prospects:read_contact')) return;
+  if (on === 'create' && agent.permissions.has('contacts:submit')) return;
+  throw forbidden(
+    on === 'create'
+      ? 'Enregistrer des coordonnées exige contacts:submit (coordonnées publiques et sourcées) ou prospects:read_contact'
+      : 'Modifier des coordonnées existantes exige de pouvoir les lire (prospects:read_contact)',
+  );
 }
 
 /** Identité et salle de l'agent, pour décider des missions qu'il voit (canAgentSeeMission). */
@@ -108,6 +145,8 @@ export function agentApiRouter({
   control,
   profiles,
   runs,
+  simulationMode,
+  campaigns,
 }: AgentApiDeps): Router {
   const router = Router();
   /**
@@ -257,6 +296,63 @@ export function agentApiRouter({
     res.json(body);
   });
 
+  /**
+   * Actions externes permises maintenant (mode simulation) : n8n la consulte AVANT tout appel
+   * externe. Lecture publique (YouTube Data API) autorisée ; dépenses et envois bloqués.
+   */
+  router.get('/capabilities', (_req, res) => {
+    const body: AgentCapabilitiesResponse = {
+      simulationMode,
+      externalActions: externalActionPolicy(simulationMode),
+      publicDataSources: [...PUBLIC_DATA_SOURCES],
+    };
+    res.json(body);
+  });
+
+  /**
+   * Schémas JSON des corps de requête et des réponses attendues du modèle (format d'Ollama), produits
+   * à partir des schémas qui valident les requêtes. Le CRM revalide tout à la réception.
+   */
+  router.get('/schemas', (_req, res) => {
+    res.json(agentJsonSchemaList());
+  });
+
+  router.get('/schemas/:name', (req, res) => {
+    const { name } = req.params;
+    if (!isAgentJsonSchemaName(name)) throw AppError.notFound(`Schéma inconnu : ${name}`);
+    res.json(agentJsonSchema(name));
+  });
+
+  if (campaigns) {
+    /**
+     * Ce que le Prospecteur doit rechercher MAINTENANT : critères actuels de la campagne de la
+     * mission (modifiables dans le CRM sans toucher au workflow) et avancement (objectif quotidien).
+     */
+    router.get('/missions/:id/campaign', async (req, res) => {
+      res.json(await campaigns.agentContext(String(req.params.id), missionScopeOf(agentOf(res))));
+    });
+
+    /** État de chaînes candidates (50 au plus) : déjà prospect, écartée pour la campagne, ou nouvelle. */
+    router.get('/channels/lookup', async (req, res) => {
+      const query = parseOrThrow(channelLookupQuerySchema, req.query, 'Vérification des chaînes');
+      res.json(await campaigns.lookupChannels(query, missionScopeOf(agentOf(res))));
+    });
+
+    /** Chaînes écartées dans SA mission de recherche en cours (motif, réévaluation après délai). */
+    router.post(
+      '/channels/rejections',
+      command({
+        status: 201,
+        render: async (resource, res) =>
+          campaigns.agentContext(resource.id, missionScopeOf(agentOf(res))),
+        execute: async (req, res, hook) => {
+          const input = parseOrThrow(channelRejectionsRequestSchema, req.body, 'Chaînes écartées');
+          await campaigns.recordRejections(input, agentOf(res).actor, hook);
+        },
+      }),
+    );
+  }
+
   /** Consommation des quotas globaux du jour (pour que n8n sache s'il peut continuer). */
   router.get('/quotas', async (_req, res) => {
     res.json(await quotas.status());
@@ -266,15 +362,11 @@ export function agentApiRouter({
   // Écritures (toutes rejouables sans effet grâce à Idempotency-Key)
   // ---------------------------------------------------------------------------
 
-  /** Agents : un prospect n'est jamais une donnée de démonstration. */
-  const agentProspectSchema = createProspectRequestSchema
-    .omit({ isDemo: true })
-    // Sans identifiant de chaîne, impossible de détecter un doublon : refusé.
-    .refine(hasChannelIdentifier, {
-      error: 'Indiquez au moins youtubeChannelId, channelHandle ou channelUrl',
-      path: ['channelHandle'],
-    });
-
+  /**
+   * Création d'un prospect : uniquement dans le cadre de SA mission de recherche en cours
+   * (missionId, vérifiée dans la transaction). Le prospect y est rattaché ; aucune mission de
+   * découverte n'est créée. Jamais une donnée de démonstration ; un identifiant de chaîne exigé.
+   */
   router.post(
     '/prospects',
     command(
@@ -283,13 +375,26 @@ export function agentApiRouter({
         render: renderDossier,
         execute: async (req, res, hook) => {
           const agent = agentOf(res);
-          const input = parseOrThrow(agentProspectSchema, req.body, 'Prospect');
+          const { missionId, ...input } = parseOrThrow(
+            agentCreateProspectRequestSchema,
+            req.body,
+            'Prospect',
+          );
+          // Même règle qu'à l'enrichissement : enregistrer des coordonnées exige de pouvoir les lire.
+          assertCanWriteContact(
+            agent,
+            CONTACT_FIELDS.some((field) => input[field] != null),
+            'create',
+          );
           // L'auteur de la découverte est fixé par le serveur, pas déclaré par l'agent.
           const request = {
             ...input,
             discovery: { ...input.discovery, discoveredBy: agent.agent.id },
           };
-          await prospects.createProspect(request, agent.actor, { hook });
+          await prospects.createProspect(request, agent.actor, {
+            hook,
+            searchMissionId: missionId,
+          });
         },
       },
       'prospect_create',
@@ -304,14 +409,12 @@ export function agentApiRouter({
         render: renderDossier,
         execute: async (req, res, hook) => {
           const request = parseOrThrow(enrichProspectRequestSchema, req.body, 'Enrichissement');
-          const touchesContact = ['contactEmail', 'contactName', 'contactSource'].some(
-            (field) => field in request,
+          // Effacer une coordonnée (null) est aussi une modification des coordonnées.
+          assertCanWriteContact(
+            agentOf(res),
+            CONTACT_FIELDS.some((field) => field in request),
+            'update',
           );
-          if (touchesContact && !agentOf(res).permissions.has('prospects:read_contact')) {
-            throw forbidden(
-              'Modifier les coordonnées exige de pouvoir les lire (prospects:read_contact)',
-            );
-          }
           await prospects.enrichProspect(String(req.params.id), request, agentOf(res).actor, {
             hook,
           });

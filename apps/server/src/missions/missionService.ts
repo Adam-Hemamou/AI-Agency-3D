@@ -342,10 +342,15 @@ export function createMissionService(
   }
 
   /** Crée une mission et son premier événement, dans la transaction fournie. */
+  /**
+   * Création d'une mission. `campaign` (service des campagnes uniquement) : mission de recherche du
+   * jour d'une campagne ; l'index unique (campagne, jour) refuse une seconde mission le même jour.
+   */
   async function createIn(
     tx: Db,
     input: CreateMissionInput,
     actor: Actor,
+    campaign?: { id: string; day: string },
   ): Promise<MissionCommandResponse> {
     if (input.prospectId !== null) {
       const prospect = await tx.prospect.findUnique({
@@ -373,6 +378,8 @@ export function createMissionService(
         agentId: input.agentId,
         maxAttempts: input.maxAttempts,
         prospectId: input.prospectId,
+        campaignId: campaign?.id ?? null,
+        campaignDay: campaign?.day ?? null,
         createdAt: now,
         updatedAt: now,
       },
@@ -386,6 +393,7 @@ export function createMissionService(
       maxAttempts: input.maxAttempts,
     };
     if (input.prospectId !== null) initial.prospectId = input.prospectId;
+    if (campaign) Object.assign(initial, { campaignId: campaign.id, campaignDay: campaign.day });
     const changes = Object.fromEntries(
       Object.entries(initial).map(([key, value]) => [key, { from: null, to: value }]),
     ) as Prisma.InputJsonObject;

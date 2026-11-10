@@ -80,9 +80,11 @@ describe('routes ouvertes aux agents : permission exigée par route', () => {
   });
 
   it('chaque permission de route ouvre au moins une route, et aucune écriture n’est libre', () => {
-    // Les permissions de lecture fines ne protègent pas une route : elles filtrent les données.
+    // Les permissions fines ne protègent pas une route : elles filtrent ou autorisent des données.
     const DATA_ONLY = new Set<AgentPermission>([
       'prospects:read_contact',
+      // Écriture de coordonnées à la création (contenu de POST /api/agent/prospects).
+      'contacts:submit',
       'analyses:read',
       'productions:read',
       'proposals:read',

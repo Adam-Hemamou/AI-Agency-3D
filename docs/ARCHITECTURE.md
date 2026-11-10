@@ -9,8 +9,9 @@ Application de bureau à usage personnel représentant une agence commerciale vi
 Des agents IA prospectent des créateurs de contenu, évaluent leur potentiel international et leur proposent
 un service de traduction et de doublage vidéo (HeyGen). Les décisions importantes restent validées par l'utilisateur.
 
-**Règle absolue du prototype : aucune action externe réelle.** Recherches, e-mails et traitements HeyGen sont simulés,
-puis intégrés un par un.
+**Règle du prototype : ni dépense ni envoi réels.** Les agents peuvent lire des données publiques par les API
+officielles (YouTube Data API) ; les e-mails et traitements HeyGen restent simulés, puis seront intégrés un par un,
+chacun avec une autorisation humaine préalable.
 
 ## 2. Décisions validées
 
@@ -247,6 +248,20 @@ statuts de relation, blocage des relances (`canSendFollowup` : jamais si refus o
 Seul le service `apps/server/src/prospects/prospectService.ts` écrit dans ces tables ; chaque décision fait
 évoluer la mission **via le moteur de missions**, dans la même transaction que le dossier.
 
+**Missions créées par le CRM.** Un prospect créé par un agent est rattaché à sa **mission de recherche en cours**
+(`search_creators`, salle de prospection, attribuée à l'agent, en cours, exécution active ; vérifiée et verrouillée
+dans la transaction) : l'événement « Prospect découvert » la cite, et **aucune mission n'est créée** (une mission de
+découverte attribuée à l'agent passerait avant ses recherches à la prise suivante). La mission `discover_creator`
+ne subsiste que dans le scénario de démonstration. Le passage en analyse crée la mission libre de l'Analyste.
+La mission de revue de **Mon bureau** (`review_prospect`) est démarrée puis soumise par le système dès sa création
+(`DIRECT_HUMAN_REVIEW_ROOMS`, résultat : version et score de la dernière analyse) : elle attend la décision de
+l'utilisateur sans étape manuelle et n'est visible d'aucun agent. La mission de validation des e-mails, elle, reste
+démarrée par un agent (rédaction ou vérification), qui la soumet.
+
+**Coordonnées.** Une seule règle pour la création et l'enrichissement : enregistrer, modifier ou effacer une
+coordonnée (`contactEmail`, `contactName`, `contactSource`) exige `prospects:read_contact`. Le rôle recommandé
+du prospecteur ne la contient pas (informations publiques uniquement) : elle est accordée explicitement.
+
 « Nouvelle analyse demandée » : la mission de revue de Mon bureau est close (décision `reject` avec motif), le
 prospect n'est **pas** refusé, une nouvelle mission d'analyse est créée avec la consigne, et l'ancienne
 analyse est conservée. Le motif de refus d'un prospect est facultatif (un motif par défaut est enregistré
@@ -456,23 +471,25 @@ Contrat : `packages/shared/src/agentApi.ts` ; règles : `packages/shared/src/age
 
 **Permissions.** Accordées une par une par l'utilisateur ; un nouvel agent n'en a aucune. Elles sont relues à chaque requête.
 
-| Méthode et route                                         | Permission          | Rôle                                                                         |
-| -------------------------------------------------------- | ------------------- | ---------------------------------------------------------------------------- |
-| `GET /api/agent/profile`                                 | aucune              | Son profil IA : rôle, paramètres du modèle, prompt actif                     |
-| `POST /api/agent/runs/claim`                             | `missions:update`   | Prend sa prochaine mission et crée l'exécution (201, 200 rejouée, 204 rien)  |
-| `POST /api/agent/runs/:id/heartbeat`                     | `missions:update`   | Signal de vie de son exécution en cours                                      |
-| `POST /api/agent/runs/:id/failure`                       | `missions:update`   | Échec de son exécution : remise en attente sans effet, sinon blocage         |
-| `GET /api/agent/runs/:id`                                | `missions:read`     | Une de ses exécutions et sa mission (lecture seule)                          |
-| `GET /api/agent/prospects/lookup`                        | `prospects:read`    | Doublons : `youtubeChannelId`, `channelHandle`, `channelUrl`, `contactEmail` |
-| `GET /api/agent/prospects/:id/context`                   | `prospects:read`    | Dossier complet + ce que l'agent peut faire maintenant                       |
-| `POST /api/agent/prospects`                              | `prospects:create`  | Créer un prospect et son dossier (refusé si doublon : 409 `ALREADY_EXISTS`)  |
-| `PATCH /api/agent/prospects/:id`                         | `prospects:enrich`  | Compléter les informations (sources obligatoires)                            |
-| `POST /api/agent/prospects/:id/analyses`                 | `analyses:write`    | Ajouter une analyse ; le score est calculé par le serveur                    |
-| `POST /api/agent/prospects/:id/productions`              | `productions:write` | Ajouter une production (extrait, doublage, proposition, brouillon d'e-mail)  |
-| `POST /api/agent/prospects/:id/stage`                    | `stages:advance`    | Faire avancer le prospect (étapes autorisées uniquement)                     |
-| `POST /api/agent/prospects/:id/events`                   | `events:write`      | Ajouter une activité à l'historique (type `agent_activity`)                  |
-| `POST /api/agent/missions/:id/transitions`               | `missions:update`   | Mettre en pause, soumettre, terminer, bloquer (démarrer : `runs/claim`)      |
-| `GET /api/agent/missions`, `GET /api/agent/missions/:id` | `missions:read`     | Missions (sans historique) : les siennes et les libres de sa salle           |
+| Méthode et route                                         | Permission          | Rôle                                                                                  |
+| -------------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------- |
+| `GET /api/agent/profile`                                 | aucune              | Son profil IA : rôle, paramètres du modèle, prompt actif                              |
+| `GET /api/agent/capabilities`                            | aucune              | Actions externes permises (lecture publique, dépense, envoi), à lire par n8n          |
+| `GET /api/agent/schemas`, `GET /api/agent/schemas/:name` | aucune              | Schémas JSON (format Ollama, corps des requêtes), issus des schémas Zod               |
+| `POST /api/agent/runs/claim`                             | `missions:update`   | Prend sa prochaine mission et crée l'exécution (201, 200 rejouée, 204 rien)           |
+| `POST /api/agent/runs/:id/heartbeat`                     | `missions:update`   | Signal de vie de son exécution en cours                                               |
+| `POST /api/agent/runs/:id/failure`                       | `missions:update`   | Échec de son exécution : remise en attente sans effet, sinon blocage                  |
+| `GET /api/agent/runs/:id`                                | `missions:read`     | Une de ses exécutions et sa mission (lecture seule)                                   |
+| `GET /api/agent/prospects/lookup`                        | `prospects:read`    | Doublons : `youtubeChannelId`, `channelHandle`, `channelUrl`, `contactEmail`          |
+| `GET /api/agent/prospects/:id/context`                   | `prospects:read`    | Dossier complet + ce que l'agent peut faire maintenant                                |
+| `POST /api/agent/prospects`                              | `prospects:create`  | Créer un prospect dans SA mission de recherche en cours (`missionId`) ; doublon : 409 |
+| `PATCH /api/agent/prospects/:id`                         | `prospects:enrich`  | Compléter les informations (sources obligatoires)                                     |
+| `POST /api/agent/prospects/:id/analyses`                 | `analyses:write`    | Ajouter une analyse ; le score est calculé par le serveur                             |
+| `POST /api/agent/prospects/:id/productions`              | `productions:write` | Ajouter une production (extrait, doublage, proposition, brouillon d'e-mail)           |
+| `POST /api/agent/prospects/:id/stage`                    | `stages:advance`    | Faire avancer le prospect (étapes autorisées uniquement)                              |
+| `POST /api/agent/prospects/:id/events`                   | `events:write`      | Ajouter une activité à l'historique (type `agent_activity`)                           |
+| `POST /api/agent/missions/:id/transitions`               | `missions:update`   | Mettre en pause, soumettre, terminer, bloquer (démarrer : `runs/claim`)               |
+| `GET /api/agent/missions`, `GET /api/agent/missions/:id` | `missions:read`     | Missions (sans historique) : les siennes et les libres de sa salle                    |
 
 **Lecture filtrée (lot D).** Les agents ne lisent **que** par `/api/agent/…` : toutes les routes de l'interface leur
 sont fermées, même en lecture (elles renvoient le dossier complet et l'historique des missions, qui contient les motifs
@@ -731,7 +748,14 @@ brancher les vrais statuts ne demandera aucune réécriture des animations.
 ## 9. Sécurité du prototype
 
 - `MODE_SIMULATION=true` par défaut. Seule la valeur exacte `false` le désactive ; toute autre valeur fait échouer le démarrage.
-- Tout fournisseur réel devra lever `AppError.externalActionBlocked()` tant que le mode simulation est actif.
+- **Actions externes des agents** (`packages/shared/src/externalActions.ts`, source unique) : elles sont exécutées
+  par n8n, jamais par le CRM, qui ne peut donc pas les empêcher techniquement. n8n consulte
+  `GET /api/agent/capabilities` avant tout appel externe et s'y conforme :
+  - **lecture publique** (`public_read`, sources `PUBLIC_DATA_SOURCES` : YouTube Data API) : autorisée, mode
+    simulation compris (gratuite, n'engage ni ne contacte personne) ;
+  - **dépense** (`spend`, ex. HeyGen) et **envoi** (`send`, e-mails, relances) : bloqués en mode simulation, et
+    toujours refusés hors simulation tant qu'aucune intégration avec autorisation humaine préalable n'existe.
+- Tout fournisseur réel côté CRM devra lever `AppError.externalActionBlocked()` tant que l'action est bloquée.
 - L'API et MySQL n'écoutent que sur `127.0.0.1` (pas d'accès depuis le réseau). Exception facultative : une
   deuxième écoute de l'API sur l'adresse Tailscale, réservée au VPS et aux routes des agents ([§ 9 ter](#9-ter-accès-du-vps-via-tailscale)).
 - **Refus par défaut** : toute requête qui n'est ni celle d'une session humaine valide, ni celle d'un agent muni
@@ -964,3 +988,8 @@ Chaque phase est validée avant de passer à la suivante.
 | 07/11/2026 | **Phase 2, étape 2f** : une exécution est close dans la transaction qui fait quitter `in_progress` à sa mission ; les agents ne démarrent ni ne reprennent plus par la route des transitions, uniquement par `runs/claim`, qui reprend aussi toute mission en cours à eux sans exécution.                                                                                                                                                          |
 | 07/11/2026 | **Phase 2, étape 2g** : la récupération tient compte du signal de vie de l'exécution active (exclue tant qu'il date de moins de `MISSION_STALE_MINUTES`), la verrouille après la mission pour ne jamais interrompre un signal concurrent, et clôt les exécutions incohérentes (`ORPHANED_RUN`).                                                                                                                                                    |
 | 07/11/2026 | **Phase 2, étape 2h** : consultation des exécutions — `GET /api/agent/runs/:id` (agent, les siennes) et `GET /api/runs` (journal paginé et filtré pour l'utilisateur), sans jamais renvoyer la sortie brute du modèle. Index `(started_at, id)` dans une migration dédiée (`20261107160000_agent_runs_started_at_index`) : une migration déjà appliquée à une base (ici `agent_runs`, appliquée à la base de démonstration) n'est jamais modifiée. |
+| 09/11/2026 | **Socle du Prospecteur, étape 1** : un agent ne crée un prospect que dans sa mission de recherche en cours (`search_creators`, exécution active), à laquelle il est rattaché ; plus aucune mission de découverte pour les agents. Un échec après création de prospects bloque la recherche (effets enregistrés), sans remise en attente.                                                                                                           |
+| 09/11/2026 | **Étape 2** : la revue de Mon bureau est soumise à l’utilisateur par le système dès sa création (avant : seul le scénario de démonstration le faisait, la revue restait « en attente » en réel). La validation des e-mails reste démarrée par un agent.                                                                                                                                                                                            |
+| 09/11/2026 | **Étape 3** : `prospects:read_contact` exigée pour toute écriture de coordonnées, création comprise. Rôle `prospector` inchangé (public uniquement).                                                                                                                                                                                                                                                                                               |
+| 09/11/2026 | **Étape 4** : mode simulation redéfini par type d’action externe (`externalActions.ts`) : lecture publique autorisée (YouTube Data API), dépenses et envois bloqués ; exposé à n8n par `GET /api/agent/capabilities`. Le CRM n’exécute aucune action externe : n8n s’y conforme.                                                                                                                                                                   |
+| 09/11/2026 | **Étape 5** : schémas JSON exposés à n8n (`GET /api/agent/schemas/:name`), produits à partir des schémas Zod (forme « entrée ») ; le CRM revalide tout à la réception.                                                                                                                                                                                                                                                                             |

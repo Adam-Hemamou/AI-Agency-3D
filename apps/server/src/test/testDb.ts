@@ -13,45 +13,36 @@ export function createTestPrisma() {
 }
 
 /**
- * Vide les tables entre deux tests.
+ * Vide les tables entre deux tests : TOUTES les tables de la base de test (lues dans
+ * information_schema), sauf l'historique des migrations. Une table ajoutée par une migration est
+ * donc vidée sans liste à tenir à jour (oubli des campagnes : données d'un test à l'autre).
  * TRUNCATE (et non DELETE) : il ne déclenche pas la protection de l'historique,
  * qui reste active pour l'application.
  */
 export async function resetDatabase(): Promise<void> {
   const url = new URL(testDatabaseUrl());
+  const database = url.pathname.replace(/^\//, '');
+  // Garde-fou : jamais une autre base que celle des tests.
+  if (!database.endsWith('_test')) {
+    throw new Error(`resetDatabase : base « ${database} » refusée (nom en _test attendu)`);
+  }
   const connection = await mariadb.createConnection({
     host: url.hostname,
     port: Number(url.port || 3306),
     user: decodeURIComponent(url.username),
     password: decodeURIComponent(url.password),
-    database: url.pathname.replace(/^\//, ''),
+    database,
     allowPublicKeyRetrieval: true,
   });
   try {
+    const tables: { name: string }[] = await connection.query(
+      `SELECT table_name AS name FROM information_schema.tables
+       WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'
+         AND table_name <> '_prisma_migrations'`,
+    );
     await connection.query('SET FOREIGN_KEY_CHECKS = 0');
-    for (const table of [
-      'mission_events',
-      'missions',
-      'prospect_events',
-      'prospect_messages',
-      'prospect_decisions',
-      'prospect_productions',
-      'prospect_analyses',
-      'prospects',
-      'prospect_counters',
-      'agent_quota_usage',
-      'agent_switch',
-      'owner_sessions',
-      'owner_credentials',
-      'agent_runs',
-      'agent_profiles',
-      'agent_prompts',
-      'agent_requests',
-      'agent_permissions',
-      'agent_api_keys',
-      'agents',
-    ]) {
-      await connection.query(`TRUNCATE TABLE \`${table}\``);
+    for (const { name } of tables) {
+      await connection.query(`TRUNCATE TABLE \`${name}\``);
     }
     await connection.query('SET FOREIGN_KEY_CHECKS = 1');
   } finally {

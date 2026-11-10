@@ -20,6 +20,7 @@ import { createDatabaseProbe } from '../db/prisma.ts';
 import { createMissionService } from '../missions/missionService.ts';
 import { createProspectService } from '../prospects/prospectService.ts';
 import { ownerClient, type OwnerClient } from '../test/ownerSession.ts';
+import { searchMissions } from '../test/searchMission.ts';
 import { createTestAgent, createTestPrisma, resetDatabase } from '../test/testDb.ts';
 
 /**
@@ -28,7 +29,6 @@ import { createTestAgent, createTestPrisma, resetDatabase } from '../test/testDb
  */
 
 const prisma = createTestPrisma();
-const SYSTEM_ACTOR = { type: 'system', id: null } as const;
 let now = new Date('2026-11-06T10:00:00.000Z'); // 11 h à Paris
 const clock = () => now;
 const missions = createMissionService(prisma);
@@ -67,9 +67,16 @@ async function createAgent(id: string, keys = 1) {
     const issued = await owner.post(`/api/agents/${id}/keys`).send({}).expect(201);
     out.push(issued_key(issued.body));
   }
+  const missionId = await search.of({ id, key: out[0] });
+  for (const key of out) missionByKey.set(key, missionId);
   return out;
 }
 const issued_key = (body: unknown) => issuedAgentKeyResponseSchema.parse(body).apiKey;
+
+/** Mission de recherche en cours de chaque agent (un prospect n'est créé que dans ce cadre). */
+const search = searchMissions(prisma, missions);
+/** Mission de recherche de l'agent de chaque clé. */
+const missionByKey = new Map<string, string>();
 
 const prospectBody = (handle: string) => ({
   creatorName: handle,
@@ -80,6 +87,12 @@ const prospectBody = (handle: string) => ({
     reason: 'Test',
     qualification: { targetFit: 'Oui', potentialInterest: 'Élevé', firstObservation: 'RAS' },
   },
+});
+
+/** Corps HTTP de création, rattaché à la mission de recherche de l'agent de cette clé. */
+const prospectFor = (key: string, handle: string) => ({
+  ...prospectBody(handle),
+  missionId: missionByKey.get(key),
 });
 
 function agentPost(key: string, path: string, body: unknown, idem = `cle-${randomUUID()}`) {
@@ -130,6 +143,8 @@ async function waves<T>(count: number, size: number, run: (i: number) => Promise
 beforeEach(async () => {
   now = new Date('2026-11-06T10:00:00.000Z');
   await resetDatabase();
+  search.forget();
+  missionByKey.clear();
   app = makeApp();
   owner = await ownerClient(app, prisma);
 });
@@ -159,12 +174,12 @@ describe('quota global de création de prospects (10 par jour)', () => {
       await agentPost(
         keys[i % keys.length]!,
         '/api/agent/prospects',
-        prospectBody(`@p${i}`),
+        prospectFor(keys[i % keys.length]!, `@p${i}`),
       ).expect(201);
     }
     const before = await snapshot();
     for (const [i, key] of keys.entries()) {
-      const res = await agentPost(key, '/api/agent/prospects', prospectBody(`@refus${i}`));
+      const res = await agentPost(key, '/api/agent/prospects', prospectFor(key, `@refus${i}`));
       expect(res.status).toBe(429);
       expect(res.body.error.code).toBe('QUOTA_EXCEEDED');
       expect(res.body.error.details).toMatchObject({ action: 'prospect_create', limit: 10 });
@@ -179,7 +194,11 @@ describe('quota global de création de prospects (10 par jour)', () => {
     const keys = [...(await createAgent('agent-a', 2)), ...(await createAgent('agent-b', 2))];
     const results = await Promise.all(
       Array.from({ length: 15 }, (_, i) =>
-        agentPost(keys[i % keys.length]!, '/api/agent/prospects', prospectBody(`@simultane${i}`)),
+        agentPost(
+          keys[i % keys.length]!,
+          '/api/agent/prospects',
+          prospectFor(keys[i % keys.length]!, `@simultane${i}`),
+        ),
       ),
     );
     const statuses = results.map((r) => r.status);
@@ -192,8 +211,8 @@ describe('quota global de création de prospects (10 par jour)', () => {
 
   it('une création refusée pour une autre raison (doublon) ne consomme rien', async () => {
     const [key] = await createAgent('agent-a');
-    await agentPost(key!, '/api/agent/prospects', prospectBody('@meme')).expect(201);
-    const dup = await agentPost(key!, '/api/agent/prospects', prospectBody('@meme'));
+    await agentPost(key!, '/api/agent/prospects', prospectFor(key!, '@meme')).expect(201);
+    const dup = await agentPost(key!, '/api/agent/prospects', prospectFor(key!, '@meme'));
     expect(dup.body.error.code).toBe('ALREADY_EXISTS');
     expect((await prisma.agentQuotaUsage.findFirstOrThrow()).used).toBe(1);
   });
@@ -201,11 +220,16 @@ describe('quota global de création de prospects (10 par jour)', () => {
   it('une requête déjà traitée reste rejouable une fois le quota atteint, sans consommer', async () => {
     const [key] = await createAgent('agent-a');
     const idem = `cle-${randomUUID()}`;
-    await agentPost(key!, '/api/agent/prospects', prospectBody('@premier'), idem).expect(201);
+    await agentPost(key!, '/api/agent/prospects', prospectFor(key!, '@premier'), idem).expect(201);
     for (let i = 1; i < 10; i++) {
-      await agentPost(key!, '/api/agent/prospects', prospectBody(`@suite${i}`)).expect(201);
+      await agentPost(key!, '/api/agent/prospects', prospectFor(key!, `@suite${i}`)).expect(201);
     }
-    const replay = await agentPost(key!, '/api/agent/prospects', prospectBody('@premier'), idem);
+    const replay = await agentPost(
+      key!,
+      '/api/agent/prospects',
+      prospectFor(key!, '@premier'),
+      idem,
+    );
     expect(replay.status).toBe(201);
     expect(replay.headers['idempotent-replayed']).toBe('true');
     expect((await prisma.agentQuotaUsage.findFirstOrThrow()).used).toBe(10);
@@ -215,19 +239,21 @@ describe('quota global de création de prospects (10 par jour)', () => {
     const [key] = await createAgent('agent-a');
     now = new Date('2026-11-06T22:59:00.000Z'); // 23 h 59 à Paris
     for (let i = 0; i < 10; i++) {
-      await agentPost(key!, '/api/agent/prospects', prospectBody(`@veille${i}`)).expect(201);
+      await agentPost(key!, '/api/agent/prospects', prospectFor(key!, `@veille${i}`)).expect(201);
     }
-    const refused = await agentPost(key!, '/api/agent/prospects', prospectBody('@refuse'));
+    const refused = await agentPost(key!, '/api/agent/prospects', prospectFor(key!, '@refuse'));
     expect(refused.status).toBe(429);
     expect(refused.body.error.details.resetsAt).toBe('2026-11-06T23:00:00.000Z');
     now = new Date('2026-11-06T23:00:30.000Z'); // 0 h 00 à Paris, le 7
-    await agentPost(key!, '/api/agent/prospects', prospectBody('@lendemain')).expect(201);
+    await agentPost(key!, '/api/agent/prospects', prospectFor(key!, '@lendemain')).expect(201);
   });
 
   it('les opérations de l’utilisateur et du système ne sont pas comptées', async () => {
     await createTestAgent(prisma, 'agent-service');
     for (let i = 0; i < 12; i++) {
-      await prospects.createProspect(prospectBody(`@humain${i}`), agentActor('agent-service'));
+      await prospects.createProspect(prospectBody(`@humain${i}`), agentActor('agent-service'), {
+        searchMissionId: await search.of({ id: 'agent-service' }),
+      });
     }
     expect(await prisma.agentQuotaUsage.count()).toBe(0);
   });
@@ -236,7 +262,9 @@ describe('quota global de création de prospects (10 par jour)', () => {
 describe('quotas globaux d’enrichissement (200) et de production (100)', () => {
   it('enrichissements : exactement 200 par jour, tous agents confondus, même en simultané', async () => {
     const keys = [...(await createAgent('agent-a')), ...(await createAgent('agent-b'))];
-    const d = await prospects.createProspect(prospectBody('@enrichi'), agentActor('agent-a'));
+    const d = await prospects.createProspect(prospectBody('@enrichi'), agentActor('agent-a'), {
+      searchMissionId: await search.of({ id: 'agent-a' }),
+    });
     const path = `/api/agent/prospects/${d.prospect.id}`;
     const results = await waves(210, 15, (i) =>
       agentPatch(keys[i % 2]!, path, { description: `Description ${i}` }),
@@ -253,13 +281,13 @@ describe('quotas globaux d’enrichissement (200) et de production (100)', () =>
     const keys = [...(await createAgent('agent-a')), ...(await createAgent('agent-b'))];
     // Dossier amené à l'étape doublage (décision humaine comprise).
     const agent = agentActor('agent-a');
-    let d = await prospects.createProspect(prospectBody('@produit'), agent);
+    let d = await prospects.createProspect(prospectBody('@produit'), agent, {
+      searchMissionId: await search.of({ id: 'agent-a' }),
+    });
     await prospects.advanceStage(d.prospect.id, { to: 'analysis' }, agent);
     d = await prospects.advanceStage(d.prospect.id, { to: 'review' }, agent);
     const review = d.missions.find((m) => m.room === 'director')!;
-    // Mission de Mon bureau : lancée par le système, comme dans le parcours réel.
-    await missions.applyAction(review.id, { action: 'start' }, SYSTEM_ACTOR);
-    await missions.applyAction(review.id, { action: 'submit_for_validation' }, SYSTEM_ACTOR);
+    // Mission de Mon bureau : soumise à l'utilisateur dès sa création.
     await prospects.decideProspect(
       d.prospect.id,
       { missionId: review.id, decision: 'approve' },
@@ -288,7 +316,7 @@ describe('quotas globaux d’enrichissement (200) et de production (100)', () =>
 
   it('l’état des quotas est consultable par les agents et par l’utilisateur', async () => {
     const [key] = await createAgent('agent-a');
-    await agentPost(key!, '/api/agent/prospects', prospectBody('@etat')).expect(201);
+    await agentPost(key!, '/api/agent/prospects', prospectFor(key!, '@etat')).expect(201);
     const forAgent = agentQuotaStatusSchema.parse(
       (
         await request(app)
@@ -333,7 +361,7 @@ describe('débit et taille des requêtes', () => {
 
   it('refuse un corps de requête trop volumineux pour un agent (413), pas pour l’utilisateur', async () => {
     const [key] = await createAgent('agent-a');
-    const big = { ...prospectBody('@gros'), description: 'x'.repeat(300_000) };
+    const big = { ...prospectFor(key!, '@gros'), description: 'x'.repeat(300_000) };
     const res = await agentPost(key!, '/api/agent/prospects', big);
     expect(res.status).toBe(413);
     expect(await prisma.prospect.count()).toBe(0);
@@ -348,7 +376,7 @@ describe('arrêt d’urgence', () => {
     request(app)
       .get(`/api/agent/prospects/${prospectId}/context`)
       .set('Authorization', `Bearer ${key}`),
-    agentPost(key, '/api/agent/prospects', prospectBody('@bloque')),
+    agentPost(key, '/api/agent/prospects', prospectFor(key, '@bloque')),
     agentPatch(key, `/api/agent/prospects/${prospectId}`, { country: 'France' }),
     agentPost(key, `/api/agent/prospects/${prospectId}/events`, { title: 'Activité' }),
     agentPost(key, `/api/agent/missions/${missionId}/transitions`, { action: 'start' }),
@@ -356,13 +384,17 @@ describe('arrêt d’urgence', () => {
 
   it('AGENTS_ENABLED=false : toutes les opérations des agents sont refusées, l’utilisateur garde l’accès', async () => {
     const [key] = await createAgent('agent-a');
-    const d = await prospects.createProspect(prospectBody('@arret'), agentActor('agent-a'));
+    const d = await prospects.createProspect(prospectBody('@arret'), agentActor('agent-a'), {
+      searchMissionId: await search.of({ id: 'agent-a' }),
+    });
     app = makeApp({ envEnabled: false });
     owner = await ownerClient(app, prisma);
     const before = await snapshot();
     const lastUsed = (await prisma.agentApiKey.findFirstOrThrow()).lastUsedAt;
 
-    for (const res of await Promise.all(agentRoutes(key!, d.prospect.id, d.missions[0]!.id))) {
+    for (const res of await Promise.all(
+      agentRoutes(key!, d.prospect.id, missionByKey.get(key!)!),
+    )) {
       expect(res.status).toBe(503);
       expect(res.body.error.code).toBe('AGENTS_DISABLED');
     }
@@ -428,7 +460,8 @@ describe('arrêt d’urgence', () => {
   });
 
   it('une écriture déjà en cours au moment de l’arrêt n’écrit rien', async () => {
-    await createAgent('agent-a');
+    const [key] = await createAgent('agent-a');
+    const searchMissionId = missionByKey.get(key!)!;
     const run = idempotency.run(
       {
         agentId: 'agent-a',
@@ -442,7 +475,10 @@ describe('arrêt d’urgence', () => {
       async (hook) => {
         // La requête a passé l'entrée du serveur ; l'utilisateur déclenche l'arrêt maintenant.
         await control.setEnabled(false);
-        await prospects.createProspect(prospectBody('@encours'), agentActor('agent-a'), { hook });
+        await prospects.createProspect(prospectBody('@encours'), agentActor('agent-a'), {
+          hook,
+          searchMissionId,
+        });
       },
       async () => null,
     );

@@ -34,6 +34,13 @@ export const AGENT_PERMISSIONS = [
   'events:write',
   'missions:read',
   'missions:update',
+  /**
+   * Enregistrer, À LA CRÉATION d'un prospect, des coordonnées professionnelles publiques et sourcées
+   * (adresse de la page où elles figurent), SANS pouvoir lire les coordonnées existantes.
+   */
+  'contacts:submit',
+  /** Mémoriser les chaînes écartées dans sa mission de recherche (motif, réévaluation). */
+  'channels:reject',
 ] as const;
 export type AgentPermission = (typeof AGENT_PERMISSIONS)[number];
 
@@ -56,6 +63,9 @@ export const AGENT_PERMISSION_LABELS: Record<AgentPermission, string> = {
   'events:write': 'Ajouter une activité à l’historique du dossier',
   'missions:read': 'Consulter les missions',
   'missions:update': 'Faire évoluer ses missions (démarrer, soumettre, terminer…)',
+  'contacts:submit':
+    'Enregistrer des coordonnées publiques et sourcées à la création d’un prospect (sans les lire)',
+  'channels:reject': 'Mémoriser les chaînes écartées pendant une recherche',
 };
 
 /**
@@ -88,8 +98,19 @@ export const AGENT_ROLE_LABELS: Record<AgentRole, string> = {
 const WORK = ['events:write', 'missions:read', 'missions:update'] as const;
 
 export const AGENT_ROLE_PERMISSIONS: Record<AgentRole, readonly AgentPermission[]> = {
-  /** Informations publiques nécessaires à la prospection. */
-  prospector: ['prospects:read', 'prospects:create', 'prospects:enrich', 'stages:advance', ...WORK],
+  /**
+   * Informations publiques nécessaires à la prospection. Il ENREGISTRE les coordonnées publiques
+   * qu'il trouve (contacts:submit) sans jamais lire celles des dossiers (pas de prospects:read_contact).
+   */
+  prospector: [
+    'prospects:read',
+    'prospects:create',
+    'prospects:enrich',
+    'stages:advance',
+    'contacts:submit',
+    'channels:reject',
+    ...WORK,
+  ],
   /** Informations publiques et analyses. */
   analyst: [
     'prospects:read',

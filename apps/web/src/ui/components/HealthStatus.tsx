@@ -51,7 +51,11 @@ export function HealthStatus({ health, isLoading, error }: HealthStatusProps) {
       />
       <Indicator
         label="Mode simulation"
-        value={health.simulationMode ? 'Actif — aucune action externe' : 'DÉSACTIVÉ'}
+        value={
+          health.simulationMode
+            ? 'Actif — lectures publiques seulement, ni dépense ni envoi'
+            : 'DÉSACTIVÉ'
+        }
         tone={health.simulationMode ? 'ok' : 'warn'}
       />
       {health.demoMode && (

@@ -11,6 +11,7 @@ import { createOwnerAuthService } from '../auth/ownerAuth.ts';
 import { ownerClient } from '../test/ownerSession.ts';
 import { AppError } from '../errors/AppError.ts';
 import { createMissionService, type Actor } from '../missions/missionService.ts';
+import { searchMissions } from '../test/searchMission.ts';
 import { createTestAgent, createTestPrisma, resetDatabase } from '../test/testDb.ts';
 import { createProspectService } from './prospectService.ts';
 
@@ -20,8 +21,14 @@ const service = createProspectService({ prisma, missions, simulationMode: true }
 
 const owner: Actor = { type: 'user', id: 'owner' };
 const agent: Actor = { type: 'agent', id: 'agent-test' };
-/** Les missions de décision humaine (Mon bureau, validation des e-mails) sont lancées par le système. */
-const system: Actor = { type: 'system', id: null };
+
+/** Mission de recherche en cours de l'agent : un agent ne crée un prospect que dans ce cadre. */
+const search = searchMissions(prisma, missions);
+async function createProspect(body: CreateProspectRequest, actor: Actor = agent) {
+  return service.createProspect(body, actor, {
+    searchMissionId: await search.of({ id: actor.id! }),
+  });
+}
 /** Agent de la salle de validation des e-mails : il prend la mission et y rattache l'e-mail. */
 const reviewer: Actor = { type: 'agent', id: 'agent-relecteur' };
 
@@ -75,7 +82,7 @@ async function expectAppError(promise: Promise<unknown>, code: string) {
 
 /** Amène un prospect jusqu'à Mon bureau (mission de revue en attente de validation). */
 async function prospectInReview(): Promise<ProspectDossier> {
-  let d = await service.createProspect(baseProspect, agent);
+  let d = await createProspect(baseProspect, agent);
   d = await service.moveToStage(d.prospect.id, 'analysis', agent, {
     mission: { type: PIPELINE_MISSION_TYPES.analyze, room: 'analysis' },
   });
@@ -83,10 +90,8 @@ async function prospectInReview(): Promise<ProspectDossier> {
   d = await service.moveToStage(d.prospect.id, 'review', agent, {
     mission: { type: PIPELINE_MISSION_TYPES.review, room: 'director', requiresValidation: true },
   });
-  const review = openMission(d, 'director');
-  await missions.applyAction(review.id, { action: 'start' }, system);
-  await missions.applyAction(review.id, { action: 'submit_for_validation' }, system);
-  return service.getDossier(d.prospect.id);
+  // La mission de revue est soumise à l'utilisateur dès sa création (aucune étape manuelle).
+  return d;
 }
 
 /** Amène un prospect jusqu'à la validation des e-mails, avec un e-mail soumis. */
@@ -125,6 +130,7 @@ const latestEmail = (d: ProspectDossier) => d.productions.find((p) => p.kind ===
 
 beforeEach(async () => {
   await resetDatabase();
+  search.forget();
   await createTestAgent(prisma, agent.id!);
   await createTestAgent(prisma, reviewer.id!, 'email_review');
 });
@@ -134,27 +140,28 @@ afterAll(async () => {
 });
 
 describe('dossier unique', () => {
-  it('crée le dossier avec sa mission de prospection et l’événement de découverte', async () => {
-    const d = await service.createProspect(baseProspect, agent);
+  it('crée le dossier rattaché à la mission de recherche de l’agent, sans nouvelle mission', async () => {
+    const d = await createProspect(baseProspect, agent);
+    const searchMissionId = await search.of({ id: agent.id! });
     expect(d.prospect).toMatchObject({
       reference: expect.stringMatching(/^P-\d{4}-0001$/),
       stage: 'prospecting',
     });
-    expect(d.missions).toHaveLength(1);
-    expect(d.missions[0]).toMatchObject({ room: 'prospecting', prospectId: d.prospect.id });
+    expect(d.missions).toHaveLength(0);
     expect(d.events.map((e) => e.type)).toEqual(['discovered']);
+    expect(d.events[0]).toMatchObject({ missionId: searchMissionId, actorId: agent.id });
     expect(prospectDossierSchema.safeParse(d).success).toBe(true);
   });
 
   it('refuse un second dossier pour la même chaîne', async () => {
-    await service.createProspect(baseProspect, agent);
-    await expectAppError(service.createProspect(baseProspect, agent), 'ALREADY_EXISTS');
+    await createProspect(baseProspect, agent);
+    await expectAppError(createProspect(baseProspect, agent), 'ALREADY_EXISTS');
   });
 
   it('garde le même dossier d’une salle à l’autre et refuse les étapes interdites', async () => {
     const d = await prospectInReview();
     expect(new Set(d.missions.map((m) => m.prospectId))).toEqual(new Set([d.prospect.id]));
-    expect(d.missions.map((m) => m.room)).toEqual(['prospecting', 'analysis', 'director']);
+    expect(d.missions.map((m) => m.room)).toEqual(['analysis', 'director']);
     // Le système lui-même ne peut pas sauter d'étape (cycle de vie)…
     await expectAppError(
       service.moveToStage(d.prospect.id, 'followup', { type: 'system', id: null }),
@@ -235,7 +242,7 @@ describe('décisions de Mon bureau', () => {
 
   it('refuse une mission d’un autre dossier, et une décision hors attente de validation', async () => {
     const a = await prospectInReview();
-    const b = await service.createProspect({ ...baseProspect, youtubeChannelId: 'TEST-2' }, agent);
+    const b = await createProspect({ ...baseProspect, youtubeChannelId: 'TEST-2' }, agent);
     await expectAppError(
       service.decideProspect(
         b.prospect.id,
@@ -432,7 +439,7 @@ describe('validation des e-mails et suivi', () => {
 
 describe('historique et API', () => {
   it('la timeline est inaltérable en base', async () => {
-    await service.createProspect(baseProspect, agent);
+    await createProspect(baseProspect, agent);
     await expect(prisma.prospectEvent.updateMany({ data: { title: 'x' } })).rejects.toThrow();
     await expect(prisma.prospectEvent.deleteMany()).rejects.toThrow();
   });

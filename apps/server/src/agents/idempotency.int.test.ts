@@ -8,7 +8,9 @@ import {
   issuedAgentKeyResponseSchema,
   missionCommandResponseSchema,
   agentDossierSchema,
+  createMissionRequestSchema,
 } from '@agency/shared';
+import { HUMAN_ACTOR } from '../auth/actors.ts';
 import { createApp } from '../app.ts';
 import { createOwnerAuthService } from '../auth/ownerAuth.ts';
 import { createDatabaseProbe } from '../db/prisma.ts';
@@ -16,6 +18,7 @@ import { createMissionService } from '../missions/missionService.ts';
 import { createProspectService } from '../prospects/prospectService.ts';
 import { ownerClient, type OwnerClient } from '../test/ownerSession.ts';
 import { testAgentLimits } from '../test/agentLimits.ts';
+import { searchMissions } from '../test/searchMission.ts';
 import { createTestPrisma, resetDatabase, testDatabaseUrl } from '../test/testDb.ts';
 import { createAgentService } from './agentService.ts';
 import { createIdempotencyStore, requestFingerprint } from './idempotency.ts';
@@ -52,7 +55,18 @@ const INTERRUPTED_BODY = {
   },
 };
 
-const body = (handle: string) => ({ ...INTERRUPTED_BODY, channelHandle: handle });
+/** Mission de recherche en cours de l'agent : un prospect n'est créé que dans ce cadre. */
+const search = searchMissions(prisma, missions);
+let searchMissionId: string;
+
+/** Corps HTTP (avec la mission de recherche) et corps du service (mission passée en option). */
+const body = (handle: string) => ({
+  ...INTERRUPTED_BODY,
+  channelHandle: handle,
+  missionId: searchMissionId,
+});
+const serviceBody = (handle: string) => ({ ...INTERRUPTED_BODY, channelHandle: handle });
+const interruptedHttpBody = () => ({ ...INTERRUPTED_BODY, missionId: searchMissionId });
 
 function agentCall(method: 'post' | 'patch', path: string, payload: unknown, key: string) {
   const client = request(app);
@@ -71,6 +85,8 @@ beforeEach(async () => {
     .expect(201);
   const issued = await owner.post(`/api/agents/${AGENT_ID}/keys`).send({}).expect(201);
   apiKey = issuedAgentKeyResponseSchema.parse(issued.body).apiKey;
+  search.forget();
+  searchMissionId = await search.of({ id: AGENT_ID, key: apiKey });
 });
 
 afterAll(async () => {
@@ -93,7 +109,7 @@ afterEach(() => {
 function startInterrupted(key: string, mode: 'before-commit' | 'after-commit') {
   const child = spawn(
     process.execPath,
-    ['--import', 'tsx', FIXTURE, testDatabaseUrl(), AGENT_ID, key, mode],
+    ['--import', 'tsx', FIXTURE, testDatabaseUrl(), AGENT_ID, key, mode, searchMissionId],
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
   children.push(child);
@@ -127,7 +143,7 @@ describe('interruption du serveur pendant une écriture', () => {
     const child = await startInterrupted(key, 'before-commit');
     await crash(child);
 
-    const res = await agentCall('post', '/api/agent/prospects', INTERRUPTED_BODY, key);
+    const res = await agentCall('post', '/api/agent/prospects', interruptedHttpBody(), key);
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(res.headers['idempotent-replayed']).toBeUndefined();
     expect(await prisma.prospect.count()).toBe(1);
@@ -140,7 +156,7 @@ describe('interruption du serveur pendant une écriture', () => {
     await crash(child);
     expect(await prisma.prospect.count()).toBe(1);
 
-    const res = await agentCall('post', '/api/agent/prospects', INTERRUPTED_BODY, key);
+    const res = await agentCall('post', '/api/agent/prospects', interruptedHttpBody(), key);
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(res.headers['idempotent-replayed']).toBe('true');
     expect(agentDossierSchema.parse(res.body).prospect.channelHandle).toBe('@interrompu');
@@ -162,7 +178,11 @@ describe('panne pendant la construction de la réponse (même processus)', () =>
           status: 201,
         },
         (hook) =>
-          prospects.createProspect(INTERRUPTED_BODY, { type: 'agent', id: AGENT_ID }, { hook }),
+          prospects.createProspect(
+            INTERRUPTED_BODY,
+            { type: 'agent', id: AGENT_ID },
+            { hook, searchMissionId },
+          ),
         render,
       );
     await expect(
@@ -177,7 +197,11 @@ describe('panne pendant la construction de la réponse (même processus)', () =>
 
   it('échec dans la transaction : la clé reste libre et rien n’est écrit', async () => {
     const key = `n8n-${randomUUID()}`;
-    const d = await prospects.createProspect(body('@cible'), { type: 'agent', id: AGENT_ID });
+    const d = await prospects.createProspect(
+      serviceBody('@cible'),
+      { type: 'agent', id: AGENT_ID },
+      { searchMissionId },
+    );
     const stage = { to: 'review' }; // interdit depuis « prospection »
     const bad = await agentCall('post', `/api/agent/prospects/${d.prospect.id}/stage`, stage, key);
     expect(bad.status).toBe(403); // un agent ne fait pas passer « prospection » → « à valider »
@@ -252,7 +276,11 @@ describe('requêtes simultanées', () => {
   });
 
   it('clés différentes en même temps sur le même dossier : chacune est exécutée une fois', async () => {
-    const d = await prospects.createProspect(body('@base'), { type: 'agent', id: AGENT_ID });
+    const d = await prospects.createProspect(
+      serviceBody('@base'),
+      { type: 'agent', id: AGENT_ID },
+      { searchMissionId },
+    );
     const results = await Promise.all(
       Array.from({ length: 4 }, (_, i) =>
         agentCall(
@@ -290,8 +318,12 @@ describe('répétitions', () => {
   });
 
   it('transition de mission : même événement renvoyé, aucune seconde transition', async () => {
-    const d = await prospects.createProspect(body('@mission'), { type: 'agent', id: AGENT_ID });
-    const missionId = d.missions[0]!.id;
+    const input = createMissionRequestSchema.parse({
+      type: 'test.tache',
+      room: 'prospecting',
+      agentId: AGENT_ID,
+    });
+    const missionId = (await missions.create(input, HUMAN_ACTOR)).mission.id;
     // Démarrage par le moteur (les agents démarrent par la prise de mission, pas par cette route).
     await missions.applyAction(missionId, { action: 'start' }, { type: 'agent', id: AGENT_ID });
     const key = `n8n-${randomUUID()}`;

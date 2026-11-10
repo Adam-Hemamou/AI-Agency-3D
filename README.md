@@ -5,7 +5,8 @@ analyse de leur potentiel international et proposition de doublage vidéo (HeyGe
 
 **État : phases 0 (fondations) et 1 (moteur de missions) terminées ; phase 2 (agence 3D) en cours de validation.** Voir [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-> Prototype : aucune action externe réelle n'est effectuée (`MODE_SIMULATION=true`).
+> Prototype (`MODE_SIMULATION=true`) : les agents peuvent lire des données publiques (YouTube Data API) ;
+> aucune dépense (HeyGen) ni aucun envoi (e-mails) n'est effectué.
 
 ## Prérequis
 

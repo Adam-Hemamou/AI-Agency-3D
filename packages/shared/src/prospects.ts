@@ -271,6 +271,13 @@ export type ProspectEventType = (typeof PROSPECT_EVENT_TYPES)[number];
 // ---------------------------------------------------------------------------
 
 export const PIPELINE_MISSION_TYPES = {
+  /**
+   * Recherche de créateurs (salle de prospection) : une mission couvre toute une session de
+   * recherche. Les prospects créés par un agent y sont rattachés (historique du dossier), sans
+   * mission de découverte propre.
+   */
+  search: 'search_creators',
+  /** Découverte d'un créateur : uniquement le scénario de démonstration (jamais un agent réel). */
   discover: 'discover_creator',
   analyze: 'analyze_creator',
   review: 'review_prospect',
@@ -282,6 +289,7 @@ export const PIPELINE_MISSION_TYPES = {
 
 /** Libellés lisibles des types de missions connus (les autres s'affichent tels quels). */
 export const MISSION_TYPE_LABELS: Record<string, string> = {
+  search_creators: 'Recherche de créateurs',
   discover_creator: 'Découverte d’un créateur',
   analyze_creator: 'Analyse du créateur',
   review_prospect: 'Validation du prospect',
