@@ -49,11 +49,21 @@ const baseProspect: CreateProspectRequest = {
   },
 };
 
-/** Prospect créé par l'agent : sa mission de prospection lui est attribuée, puis démarrée. */
+/**
+ * Prospect et mission de l'agent sur ce dossier, démarrée une minute plus tard. Avant le démarrage,
+ * une activité du dossier cite déjà la mission (préparation) : ce n'est pas un effet du traitement.
+ */
 async function prospectWithStartedMission() {
-  const d = await prospects.createProspect(baseProspect, agent);
-  const mission = d.missions[0]!;
-  later(60_000); // démarrée une minute après la découverte
+  const d = await prospects.createProspect(baseProspect, { type: 'system', id: null });
+  const input = createMissionRequestSchema.parse({
+    type: 'analysis.score',
+    room: 'analysis',
+    agentId: agent.id,
+    prospectId: d.prospect.id,
+  });
+  const { mission } = await missions.create(input, user);
+  await prospects.logActivity(d.prospect.id, { title: 'Préparation', missionId: mission.id }, user);
+  later(60_000); // démarrée une minute après
   await missions.applyAction(mission.id, { action: 'start' }, agent);
   return { prospectId: d.prospect.id, missionId: mission.id };
 }
@@ -170,7 +180,7 @@ describe('récupération des missions interrompues', () => {
   });
 
   it('les effets antérieurs au démarrage ne sont pas comptés', async () => {
-    // La découverte (avant le démarrage) cite la mission : ce n'est pas un effet du traitement.
+    // L'activité de préparation (avant le démarrage) cite la mission : pas un effet du traitement.
     const { missionId } = await prospectWithStartedMission();
     later(2 * HOUR);
     const [recovered] = await missions.recoverStale(STALE);

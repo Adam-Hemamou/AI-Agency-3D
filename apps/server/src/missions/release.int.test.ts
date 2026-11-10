@@ -30,6 +30,18 @@ async function newMission(overrides: Record<string, unknown> = {}) {
   return (await missions.create(input, OWNER)).mission;
 }
 
+/** Prospect (créé par le système) et mission du prospecteur sur ce dossier. */
+async function prospectorMission() {
+  const d = await prospects.createProspect(baseProspect, SYSTEM);
+  const mission = await newMission({
+    type: 'prospecting.enrich',
+    room: 'prospecting',
+    agentId: prospector.id,
+    prospectId: d.prospect.id,
+  });
+  return { d, mission };
+}
+
 async function expectAppError(promise: Promise<unknown>, code: string, status?: number) {
   const error = await promise.then(
     () => null,
@@ -103,8 +115,7 @@ describe('remise en attente sans effet', () => {
 
 describe('remise en attente refusée', () => {
   it('si la mission a déjà produit un effet depuis son démarrage', async () => {
-    const d = await prospects.createProspect(baseProspect, prospector);
-    const mission = d.missions[0]!; // attribuée au prospecteur
+    const { d, mission } = await prospectorMission(); // attribuée au prospecteur
     await missions.applyAction(mission.id, { action: 'start' }, prospector);
     await prospects.logActivity(
       d.prospect.id,
@@ -169,8 +180,7 @@ describe('remise en attente refusée', () => {
 
 describe('concurrence avec une écriture qui cite la mission', () => {
   it('écriture en cours de validation : la remise en attente l’attend, la voit et est refusée', async () => {
-    const d = await prospects.createProspect(baseProspect, prospector);
-    const mission = d.missions[0]!;
+    const { d, mission } = await prospectorMission();
     await missions.applyAction(mission.id, { action: 'start' }, prospector);
 
     let reached!: () => void;

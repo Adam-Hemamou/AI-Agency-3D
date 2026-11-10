@@ -29,6 +29,11 @@ export const AGENT_ROUTES: readonly AgentRoute[] = [
   // API des agents.
   // Quotas globaux du jour : utiles à tout agent pour savoir s'il peut continuer.
   { methods: READ, pattern: /^\/api\/agent\/quotas\/?$/, permission: null },
+  // Actions externes permises (mode simulation) : à consulter par n8n avant tout appel externe.
+  { methods: READ, pattern: /^\/api\/agent\/capabilities\/?$/, permission: null },
+  // Schémas JSON (format des réponses du modèle, corps des requêtes) : publics pour tout agent.
+  { methods: READ, pattern: /^\/api\/agent\/schemas\/?$/, permission: null },
+  { methods: READ, pattern: new RegExp(`^/api/agent/schemas/${SEG}/?$`), permission: null },
   // Son propre profil IA (rôle, paramètres, prompt actif) : nécessaire pour travailler.
   { methods: READ, pattern: /^\/api\/agent\/profile\/?$/, permission: null },
   // Prise de mission par n8n : démarre une mission et crée son exécution.
@@ -51,6 +56,20 @@ export const AGENT_ROUTES: readonly AgentRoute[] = [
     permission: 'missions:update',
   },
   { methods: READ, pattern: /^\/api\/agent\/missions\/?$/, permission: 'missions:read' },
+  // Critères actuels de la campagne de SA mission de recherche, et avancement.
+  {
+    methods: READ,
+    pattern: new RegExp(`^/api/agent/missions/${SEG}/campaign/?$`),
+    permission: 'missions:read',
+  },
+  // Chaînes candidates : déjà prospect, écartée pour la campagne, ou nouvelle.
+  { methods: READ, pattern: /^\/api\/agent\/channels\/lookup\/?$/, permission: 'prospects:read' },
+  // Chaînes écartées dans SA mission de recherche en cours.
+  {
+    methods: ['POST'],
+    pattern: /^\/api\/agent\/channels\/rejections\/?$/,
+    permission: 'channels:reject',
+  },
   {
     methods: READ,
     pattern: new RegExp(`^/api/agent/missions/${SEG}/?$`),

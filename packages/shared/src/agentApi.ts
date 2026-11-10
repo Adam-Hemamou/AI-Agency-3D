@@ -4,6 +4,7 @@ import { MISSION_PRIORITY } from './missions';
 import { jsonObjectSchema, missionSchema } from './missionApi';
 import {
   analysisSchema,
+  createProspectRequestSchema,
   decisionSchema,
   httpUrlSchema,
   messageSchema,
@@ -112,6 +113,30 @@ export function hasChannelIdentifier(p: {
     p.youtubeChannelId || channelHandleKey(p.channelHandle, p.channelUrl) || p.channelUrl,
   );
 }
+
+/**
+ * POST /api/agent/prospects : création d'un prospect par un agent.
+ * - missionId : SA mission de recherche en cours (type search_creators, salle de prospection, avec
+ *   une exécution active). Le prospect y est rattaché ; aucune mission de découverte n'est créée.
+ * - jamais une donnée de démonstration ;
+ * - au moins un identifiant de chaîne (sans lui, aucun doublon ne peut être détecté).
+ */
+export const agentCreateProspectRequestSchema = createProspectRequestSchema
+  .omit({ isDemo: true })
+  .extend({ missionId: idSchema })
+  .refine(hasChannelIdentifier, {
+    error: 'Indiquez au moins youtubeChannelId, channelHandle ou channelUrl',
+    path: ['channelHandle'],
+  })
+  // Coordonnées publiques et sourcées : la source est l'adresse http(s) de la page où elles figurent.
+  .refine(
+    (p) => (!p.contactEmail && !p.contactName) || httpUrlSchema.safeParse(p.contactSource).success,
+    {
+      error: 'Coordonnées : indiquez l’adresse (http/https) de la page publique où elles figurent',
+      path: ['contactSource'],
+    },
+  );
+export type AgentCreateProspectRequest = z.input<typeof agentCreateProspectRequestSchema>;
 
 export const DUPLICATE_MATCH_FIELDS = [
   'youtubeChannelId',

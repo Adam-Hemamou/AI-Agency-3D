@@ -12,7 +12,7 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "dev": "concurrently -n server,web -c blue,magenta \"npm run dev -w @agency/server\" \"npm run dev -w @agency/web\"",
+    "dev": "concurrently -n server,web -c blue,magenta \"node scripts/dev-server.mjs\" \"npm run dev -w @agency/web\"",
     "dev:demo": "concurrently -n demo-server,demo-web -c blue,magenta \"npm run dev:demo -w @agency/server\" \"npm run dev:demo -w @agency/web\"",
     "demo:setup": "npm run demo:setup -w @agency/server",
     "test": "npm run test --workspaces --if-present",

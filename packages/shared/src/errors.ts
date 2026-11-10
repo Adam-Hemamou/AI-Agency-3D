@@ -38,6 +38,15 @@ export const ERROR_CODES = {
   CONTACT_NOT_ALLOWED: 'CONTACT_NOT_ALLOWED',
   /** L'agent n'a aucun prompt actif : il ne peut prendre aucune mission. */
   AGENT_PROMPT_MISSING: 'AGENT_PROMPT_MISSING',
+  /** Objectif quotidien de la campagne atteint : plus aucun prospect dans cette mission. */
+  CAMPAIGN_TARGET_REACHED: 'CAMPAIGN_TARGET_REACHED',
+  /**
+   * Activation ou objectif refusé : la somme des objectifs quotidiens des campagnes actives
+   * dépasserait le quota global de créations de prospects.
+   */
+  CAMPAIGN_TARGETS_EXCEED_QUOTA: 'CAMPAIGN_TARGETS_EXCEED_QUOTA',
+  /** Campagne désactivée : la mission de recherche ne peut plus rien enregistrer. */
+  CAMPAIGN_DISABLED: 'CAMPAIGN_DISABLED',
   INTERNAL_ERROR: 'INTERNAL_ERROR',
 } as const;
 

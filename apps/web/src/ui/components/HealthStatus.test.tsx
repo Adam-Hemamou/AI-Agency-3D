@@ -22,7 +22,9 @@ describe('HealthStatus', () => {
     render(<HealthStatus isLoading={false} health={healthy} />);
     expect(screen.getByText('En ligne · v0.1.0')).toBeInTheDocument();
     expect(screen.getByText('Connectée · 4 ms')).toBeInTheDocument();
-    expect(screen.getByText('Actif — aucune action externe')).toBeInTheDocument();
+    expect(
+      screen.getByText('Actif — lectures publiques seulement, ni dépense ni envoi'),
+    ).toBeInTheDocument();
   });
 
   it('signale une base hors ligne', () => {

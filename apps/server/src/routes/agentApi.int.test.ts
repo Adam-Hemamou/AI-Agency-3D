@@ -26,6 +26,7 @@ import { createMissionService } from '../missions/missionService.ts';
 import { createProspectService } from '../prospects/prospectService.ts';
 import { ownerClient, type OwnerClient } from '../test/ownerSession.ts';
 import { testAgentLimits } from '../test/agentLimits.ts';
+import { searchMissions } from '../test/searchMission.ts';
 import { createTestPrisma, resetDatabase } from '../test/testDb.ts';
 
 const prisma = createTestPrisma();
@@ -85,7 +86,7 @@ const prospectBody = (overrides: Record<string, unknown> = {}) => ({
   youtubeChannelId: 'UC-LEA-001',
   channelUrl: 'https://youtube.example/@LaCuisineDeLea',
   contactEmail: 'contact@lea.example',
-  contactSource: 'Page À propos',
+  contactSource: 'https://youtube.example/@LaCuisineDeLea/about',
   discovery: {
     source: 'Recherche YouTube (simulée)',
     reason: 'Recettes adaptables à l’international',
@@ -94,6 +95,17 @@ const prospectBody = (overrides: Record<string, unknown> = {}) => ({
   },
   ...overrides,
 });
+
+/** Prospect sans coordonnées (agent sans prospects:read_contact). */
+const NO_CONTACT = { contactEmail: null, contactSource: null };
+
+/** Mission de recherche en cours de chaque agent (un prospect n'est créé que dans ce cadre). */
+const search = searchMissions(prisma, missions);
+
+/** Corps de création d'un prospect par CET agent, rattaché à sa mission de recherche en cours. */
+async function prospectFor(agent: TestAgent, overrides: Record<string, unknown> = {}) {
+  return prospectBody({ missionId: await search.of(agent), ...overrides });
+}
 
 const analysisBody = (missionId: string | null = null) => ({
   missionId,
@@ -175,7 +187,9 @@ function expectError(res: request.Response, status: number, code: string) {
 
 /** Prospect créé par l'agent puis passé en analyse. */
 async function prospectInAnalysis(agent: TestAgent) {
-  const created = dossierOf(await call(agent, 'post', '/api/agent/prospects', prospectBody()));
+  const created = dossierOf(
+    await call(agent, 'post', '/api/agent/prospects', await prospectFor(agent)),
+  );
   const res = await call(agent, 'post', `/api/agent/prospects/${created.prospect.id}/stage`, {
     to: 'analysis',
   });
@@ -193,10 +207,9 @@ async function prospectInDubbing(agent: TestAgent) {
   );
   // Mon bureau est la salle de l'utilisateur : la mission de revue n'est visible d'aucun agent.
   expect(review.missions.some((m) => m.room === 'director')).toBe(false);
+  // Soumise à l'utilisateur dès sa création : la décision est possible immédiatement.
   const mission = await openMissionIn(id, 'director');
-  for (const action of ['start', 'submit_for_validation']) {
-    await owner.post(`/api/missions/${mission.id}/transitions`).send({ action }).expect(200);
-  }
+  expect(mission.status).toBe('awaiting_validation');
   return prospects.decideProspect(id, { missionId: mission.id, decision: 'approve' }, HUMAN_ACTOR);
 }
 
@@ -205,6 +218,7 @@ let owner: OwnerClient;
 
 beforeEach(async () => {
   await resetDatabase();
+  search.forget();
   owner = await ownerClient(app, prisma);
 });
 
@@ -222,13 +236,19 @@ describe('accès à l’API des agents', () => {
 
   it('chaque action exige sa permission', async () => {
     const reader = await createAgent('agent-lecteur', ['prospects:read']);
-    const res = await call(reader, 'post', '/api/agent/prospects', prospectBody());
+    const res = await call(reader, 'post', '/api/agent/prospects', await prospectFor(reader));
     expectError(res, 403, 'FORBIDDEN_ACTOR');
     expect(res.body.error.details).toEqual({ requiredPermission: 'prospects:create' });
     expect((await prospects.list({})).total).toBe(0);
 
     const creator = await createAgent('agent-createur', ['prospects:create']);
-    const created = await call(creator, 'post', '/api/agent/prospects', prospectBody());
+    // Sans prospects:read_contact, il ne peut pas enregistrer de coordonnées.
+    const created = await call(
+      creator,
+      'post',
+      '/api/agent/prospects',
+      await prospectFor(creator, NO_CONTACT),
+    );
     expect(created.status).toBe(201);
     const id = dossierOf(created).prospect.id;
     // Créer n'autorise ni à lire, ni à enrichir, ni à analyser.
@@ -251,7 +271,9 @@ describe('accès à l’API des agents', () => {
 
   it('les permissions retirées par l’utilisateur cessent aussitôt de fonctionner', async () => {
     const agent = await createAgent('agent-a', ['prospects:read', 'prospects:create']);
-    await call(agent, 'post', '/api/agent/prospects', prospectBody()).expect(201);
+    await call(agent, 'post', '/api/agent/prospects', await prospectFor(agent, NO_CONTACT)).expect(
+      201,
+    );
     await owner
       .patch('/api/agents/agent-a')
       .send({ permissions: ['prospects:read'] })
@@ -260,16 +282,22 @@ describe('accès à l’API des agents', () => {
       agent,
       'post',
       '/api/agent/prospects',
-      prospectBody({ youtubeChannelId: 'UC-AUTRE', channelHandle: null, channelUrl: null }),
+      await prospectFor(agent, {
+        youtubeChannelId: 'UC-AUTRE',
+        channelHandle: null,
+        channelUrl: null,
+      }),
     );
     expectError(res, 403, 'FORBIDDEN_ACTOR');
   });
 });
 
 describe('création d’un prospect et doublons', () => {
-  it('crée le dossier au nom de l’agent, avec sa mission de prospection', async () => {
+  it('crée le dossier au nom de l’agent, rattaché à sa mission de recherche, sans nouvelle mission', async () => {
     const agent = await createAgent('agent-prospecteur');
-    const res = await call(agent, 'post', '/api/agent/prospects', prospectBody());
+    const searchMissionId = await search.of(agent);
+    const missionsBefore = await prisma.mission.count();
+    const res = await call(agent, 'post', '/api/agent/prospects', await prospectFor(agent));
     expect(res.status).toBe(201);
     const d = dossierOf(res);
     expect(d.prospect).toMatchObject({
@@ -283,13 +311,23 @@ describe('création d’un prospect et doublons', () => {
       type: 'discovered',
       actorType: 'agent',
       actorId: 'agent-prospecteur',
+      missionId: searchMissionId,
     });
-    expect(d.missions).toMatchObject([{ room: 'prospecting', agentId: 'agent-prospecteur' }]);
+    // Aucune mission de découverte : rien qui passerait avant ses recherches à la prise suivante.
+    expect(d.missions).toEqual([]);
+    expect(await prisma.mission.count()).toBe(missionsBefore);
+    const searchMission = await missions.get(searchMissionId);
+    expect(searchMission).toMatchObject({ status: 'in_progress', agentId: 'agent-prospecteur' });
   });
 
   it('refuse de marquer un prospect comme donnée de démonstration', async () => {
     const agent = await createAgent('agent-prospecteur');
-    const res = await call(agent, 'post', '/api/agent/prospects', prospectBody({ isDemo: true }));
+    const res = await call(
+      agent,
+      'post',
+      '/api/agent/prospects',
+      await prospectFor(agent, { isDemo: true }),
+    );
     expectError(res, 400, 'VALIDATION_ERROR');
   });
 
@@ -299,7 +337,7 @@ describe('création d’un prospect et doublons', () => {
       agent,
       'post',
       '/api/agent/prospects',
-      prospectBody({ youtubeChannelId: null, channelHandle: null, channelUrl: null }),
+      await prospectFor(agent, { youtubeChannelId: null, channelHandle: null, channelUrl: null }),
     );
     expectError(res, 400, 'VALIDATION_ERROR');
     expect((await prospects.list({})).total).toBe(0);
@@ -311,10 +349,12 @@ describe('création d’un prospect et doublons', () => {
       agent,
       'post',
       '/api/agent/prospects',
-      prospectBody({ channelUrl: 'javascript:fetch("/api/prospects")' }),
+      await prospectFor(agent, { channelUrl: 'javascript:fetch("/api/prospects")' }),
     );
     expectError(res, 400, 'VALIDATION_ERROR');
-    const d = dossierOf(await call(agent, 'post', '/api/agent/prospects', prospectBody()));
+    const d = dossierOf(
+      await call(agent, 'post', '/api/agent/prospects', await prospectFor(agent)),
+    );
     expectError(
       await call(agent, 'patch', `/api/agent/prospects/${d.prospect.id}`, {
         avatarUrl: 'data:text/html,<script>1</script>',
@@ -326,7 +366,9 @@ describe('création d’un prospect et doublons', () => {
 
   it('trouve un dossier existant par identifiant, nom de chaîne, adresse ou e-mail', async () => {
     const agent = await createAgent('agent-prospecteur');
-    const d = dossierOf(await call(agent, 'post', '/api/agent/prospects', prospectBody()));
+    const d = dossierOf(
+      await call(agent, 'post', '/api/agent/prospects', await prospectFor(agent)),
+    );
     const lookup = async (query: Record<string, string>) =>
       prospectLookupResponseSchema.parse(
         (await call(agent, 'get', '/api/agent/prospects/lookup').query(query).expect(200)).body,
@@ -358,8 +400,15 @@ describe('création d’un prospect et doublons', () => {
     ['même adresse de chaîne', { youtubeChannelId: null, channelHandle: null }],
   ])('refuse un doublon : %s', async (_label, overrides) => {
     const agent = await createAgent('agent-prospecteur');
-    const first = dossierOf(await call(agent, 'post', '/api/agent/prospects', prospectBody()));
-    const res = await call(agent, 'post', '/api/agent/prospects', prospectBody(overrides));
+    const first = dossierOf(
+      await call(agent, 'post', '/api/agent/prospects', await prospectFor(agent)),
+    );
+    const res = await call(
+      agent,
+      'post',
+      '/api/agent/prospects',
+      await prospectFor(agent, overrides),
+    );
     expectError(res, 409, 'ALREADY_EXISTS');
     expect(res.body.error.details.matches[0].prospect.reference).toBe(first.prospect.reference);
     expect((await prospects.list({})).total).toBe(1);
@@ -368,12 +417,16 @@ describe('création d’un prospect et doublons', () => {
   it('deux créations simultanées de chaînes différentes reçoivent chacune leur numéro', async () => {
     const agent = await createAgent('agent-prospecteur');
     const results = await Promise.all(
-      [1, 2, 3].map((n) =>
+      [1, 2, 3].map(async (n) =>
         call(
           agent,
           'post',
           '/api/agent/prospects',
-          prospectBody({ youtubeChannelId: `UC-${n}`, channelHandle: `@c${n}`, channelUrl: null }),
+          await prospectFor(agent, {
+            youtubeChannelId: `UC-${n}`,
+            channelHandle: `@c${n}`,
+            channelUrl: null,
+          }),
         ),
       ),
     );
@@ -386,15 +439,27 @@ describe('création d’un prospect et doublons', () => {
 describe('requêtes répétées (idempotence)', () => {
   it('exige une clé d’idempotence sur toute écriture', async () => {
     const agent = await createAgent('agent-prospecteur');
-    const res = await call(agent, 'post', '/api/agent/prospects', prospectBody(), null);
+    const res = await call(agent, 'post', '/api/agent/prospects', await prospectFor(agent), null);
     expectError(res, 400, 'VALIDATION_ERROR');
     expect((await prospects.list({})).total).toBe(0);
   });
 
   it('une requête rejouée avec la même clé renvoie la même réponse sans rien refaire', async () => {
     const agent = await createAgent('agent-prospecteur');
-    const first = await call(agent, 'post', '/api/agent/prospects', prospectBody(), 'n8n-exec-1');
-    const replay = await call(agent, 'post', '/api/agent/prospects', prospectBody(), 'n8n-exec-1');
+    const first = await call(
+      agent,
+      'post',
+      '/api/agent/prospects',
+      await prospectFor(agent),
+      'n8n-exec-1',
+    );
+    const replay = await call(
+      agent,
+      'post',
+      '/api/agent/prospects',
+      await prospectFor(agent),
+      'n8n-exec-1',
+    );
     expect(first.status).toBe(201);
     expect(replay.status).toBe(201);
     expect(replay.headers['idempotent-replayed']).toBe('true');
@@ -405,7 +470,7 @@ describe('requêtes répétées (idempotence)', () => {
 
   it('l’ordre des champs n’empêche pas de reconnaître une répétition', async () => {
     const agent = await createAgent('agent-prospecteur');
-    const body = prospectBody();
+    const body = await prospectFor(agent);
     const reversed = Object.fromEntries(Object.entries(body).reverse());
     await call(agent, 'post', '/api/agent/prospects', body, 'n8n-exec-2').expect(201);
     const replay = await call(agent, 'post', '/api/agent/prospects', reversed, 'n8n-exec-2');
@@ -414,12 +479,22 @@ describe('requêtes répétées (idempotence)', () => {
 
   it('refuse de réutiliser une clé pour une autre requête', async () => {
     const agent = await createAgent('agent-prospecteur');
-    await call(agent, 'post', '/api/agent/prospects', prospectBody(), 'n8n-exec-3').expect(201);
+    await call(
+      agent,
+      'post',
+      '/api/agent/prospects',
+      await prospectFor(agent),
+      'n8n-exec-3',
+    ).expect(201);
     const other = await call(
       agent,
       'post',
       '/api/agent/prospects',
-      prospectBody({ youtubeChannelId: 'UC-AUTRE', channelHandle: null, channelUrl: null }),
+      await prospectFor(agent, {
+        youtubeChannelId: 'UC-AUTRE',
+        channelHandle: null,
+        channelUrl: null,
+      }),
       'n8n-exec-3',
     );
     expectError(other, 409, 'IDEMPOTENCY_CONFLICT');
@@ -436,14 +511,20 @@ describe('requêtes répétées (idempotence)', () => {
       'n8n-exec-4',
     );
     expectError(bad, 400, 'VALIDATION_ERROR');
-    await call(agent, 'post', '/api/agent/prospects', prospectBody(), 'n8n-exec-4').expect(201);
+    await call(
+      agent,
+      'post',
+      '/api/agent/prospects',
+      await prospectFor(agent),
+      'n8n-exec-4',
+    ).expect(201);
   });
 
   it('deux répétitions simultanées n’exécutent la requête qu’une fois, et reçoivent la même réponse', async () => {
     const agent = await createAgent('agent-prospecteur');
     const results = await Promise.all(
-      [1, 2, 3].map(() =>
-        call(agent, 'post', '/api/agent/prospects', prospectBody(), 'n8n-exec-5'),
+      [1, 2, 3].map(async () =>
+        call(agent, 'post', '/api/agent/prospects', await prospectFor(agent), 'n8n-exec-5'),
       ),
     );
     expect(results.map((r) => r.status)).toEqual([201, 201, 201]);
@@ -454,12 +535,12 @@ describe('requêtes répétées (idempotence)', () => {
   it('les clés sont propres à chaque agent', async () => {
     const a = await createAgent('agent-a');
     const b = await createAgent('agent-b');
-    await call(a, 'post', '/api/agent/prospects', prospectBody(), 'meme-cle-01').expect(201);
+    await call(a, 'post', '/api/agent/prospects', await prospectFor(a), 'meme-cle-01').expect(201);
     const res = await call(
       b,
       'post',
       '/api/agent/prospects',
-      prospectBody({ youtubeChannelId: 'UC-B', channelHandle: '@b', channelUrl: null }),
+      await prospectFor(b, { youtubeChannelId: 'UC-B', channelHandle: '@b', channelUrl: null }),
       'meme-cle-01',
     );
     expect(res.status).toBe(201);
@@ -468,7 +549,13 @@ describe('requêtes répétées (idempotence)', () => {
 
   it('chaque écriture est journalisée au nom de l’agent', async () => {
     const agent = await createAgent('agent-prospecteur');
-    await call(agent, 'post', '/api/agent/prospects', prospectBody(), 'n8n-exec-6').expect(201);
+    await call(
+      agent,
+      'post',
+      '/api/agent/prospects',
+      await prospectFor(agent),
+      'n8n-exec-6',
+    ).expect(201);
     const rows = await prisma.agentRequest.findMany();
     expect(rows).toMatchObject([
       {
@@ -485,7 +572,9 @@ describe('requêtes répétées (idempotence)', () => {
 describe('enrichissement', () => {
   it('enregistre les champs modifiés, avec l’ancienne et la nouvelle valeur', async () => {
     const agent = await createAgent('agent-analyste');
-    const d = dossierOf(await call(agent, 'post', '/api/agent/prospects', prospectBody()));
+    const d = dossierOf(
+      await call(agent, 'post', '/api/agent/prospects', await prospectFor(agent)),
+    );
     const res = await call(agent, 'patch', `/api/agent/prospects/${d.prospect.id}`, {
       country: 'France',
       subscriberCount: 125_000,
@@ -517,7 +606,9 @@ describe('enrichissement', () => {
 
   it('ne change rien si les valeurs sont déjà à jour', async () => {
     const agent = await createAgent('agent-analyste');
-    const d = dossierOf(await call(agent, 'post', '/api/agent/prospects', prospectBody()));
+    const d = dossierOf(
+      await call(agent, 'post', '/api/agent/prospects', await prospectFor(agent)),
+    );
     const res = await call(agent, 'patch', `/api/agent/prospects/${d.prospect.id}`, {
       creatorName: 'Léa Martin',
     });
@@ -528,7 +619,9 @@ describe('enrichissement', () => {
 
   it('refuse de changer l’identité de la chaîne ou de créer un doublon', async () => {
     const agent = await createAgent('agent-analyste');
-    const d = dossierOf(await call(agent, 'post', '/api/agent/prospects', prospectBody()));
+    const d = dossierOf(
+      await call(agent, 'post', '/api/agent/prospects', await prospectFor(agent)),
+    );
     expectError(
       await call(agent, 'patch', `/api/agent/prospects/${d.prospect.id}`, {
         youtubeChannelId: 'UC-X',
@@ -541,7 +634,11 @@ describe('enrichissement', () => {
         agent,
         'post',
         '/api/agent/prospects',
-        prospectBody({ youtubeChannelId: 'UC-2', channelHandle: '@deux', channelUrl: null }),
+        await prospectFor(agent, {
+          youtubeChannelId: 'UC-2',
+          channelHandle: '@deux',
+          channelUrl: null,
+        }),
       ),
     );
     expectError(
@@ -555,7 +652,9 @@ describe('enrichissement', () => {
 
   it('refuse les champs réservés à l’utilisateur', async () => {
     const agent = await createAgent('agent-analyste');
-    const d = dossierOf(await call(agent, 'post', '/api/agent/prospects', prospectBody()));
+    const d = dossierOf(
+      await call(agent, 'post', '/api/agent/prospects', await prospectFor(agent)),
+    );
     for (const body of [
       { stage: 'review' },
       { doNotContact: false },
@@ -571,7 +670,9 @@ describe('enrichissement', () => {
 
   it('refuse une modification basée sur une version périmée', async () => {
     const agent = await createAgent('agent-analyste');
-    const d = dossierOf(await call(agent, 'post', '/api/agent/prospects', prospectBody()));
+    const d = dossierOf(
+      await call(agent, 'post', '/api/agent/prospects', await prospectFor(agent)),
+    );
     await call(agent, 'patch', `/api/agent/prospects/${d.prospect.id}`, {
       country: 'France',
     }).expect(200);
@@ -590,7 +691,9 @@ describe('analyses, productions et étapes', () => {
   it('ajoute une analyse et calcule le score, à l’étape d’analyse seulement', async () => {
     const prospector = await createAgent('agent-prospecteur');
     const agent = await createAgent('agent-analyste', AGENT_PERMISSIONS, 'analysis');
-    const early = dossierOf(await call(prospector, 'post', '/api/agent/prospects', prospectBody()));
+    const early = dossierOf(
+      await call(prospector, 'post', '/api/agent/prospects', await prospectFor(prospector)),
+    );
     expectError(
       await call(
         agent,
@@ -632,14 +735,25 @@ describe('analyses, productions et étapes', () => {
         agent,
         'post',
         '/api/agent/prospects',
-        prospectBody({ youtubeChannelId: 'UC-B', channelHandle: '@b', channelUrl: null }),
+        await prospectFor(agent, {
+          youtubeChannelId: 'UC-B',
+          channelHandle: '@b',
+          channelUrl: null,
+        }),
       ),
     );
+    const otherMission = createMissionRequestSchema.parse({
+      type: 'test.tache',
+      room: 'analysis',
+      agentId: 'agent-analyste',
+      prospectId: b.prospect.id,
+    });
+    const { mission } = await missions.create(otherMission, HUMAN_ACTOR);
     const res = await call(
       agent,
       'post',
       `/api/agent/prospects/${a.prospect.id}/analyses`,
-      analysisBody(b.missions[0]!.id),
+      analysisBody(mission.id),
     );
     expectError(res, 400, 'VALIDATION_ERROR');
   });
@@ -660,15 +774,34 @@ describe('analyses, productions et étapes', () => {
     const after = dossierOf(res);
     expect(after.prospect.stage).toBe('review');
     expect(after.missions.some((m) => m.room === 'director')).toBe(false);
-    expect(await openMissionIn(after.prospect.id, 'director')).toMatchObject({
+    const review = await openMissionIn(after.prospect.id, 'director');
+    // Soumise à l'utilisateur dès sa création, par le système : visible et décidable dans Mon bureau.
+    expect(review).toMatchObject({
+      type: 'review_prospect',
       requiresValidation: true,
       agentId: null,
+      status: 'awaiting_validation',
+      output: { analysisVersion: 1, score: 76 },
     });
+    const history = await missions.events(review.id);
+    expect(history.map((e) => [e.action, e.actorType])).toEqual([
+      ['created', 'system'],
+      ['start', 'system'],
+      ['submit_for_validation', 'system'],
+    ]);
     expect(after.events.at(-1)).toMatchObject({
       type: 'stage_changed',
       actorType: 'agent',
       actorId: 'agent-analyste',
     });
+    // Aucun agent ne la voit ni ne peut la prendre ; l'utilisateur décide sans étape manuelle.
+    const visible = await call(agent, 'get', `/api/agent/missions/${review.id}`);
+    expectError(visible, 403, 'FORBIDDEN_ACTOR');
+    const decided = await owner
+      .post(`/api/prospects/${after.prospect.id}/decisions`)
+      .send({ missionId: review.id, decision: 'approve', expectedVersion: after.prospect.version });
+    expect(decided.status, JSON.stringify(decided.body)).toBe(200);
+    expect(prospectDossierSchema.parse(decided.body).prospect.stage).toBe('dubbing');
   });
 
   it('un agent ne franchit jamais une étape de décision humaine', async () => {
@@ -690,7 +823,9 @@ describe('analyses, productions et étapes', () => {
   it('un agent rattaché à une salle ne fait avancer que les dossiers de sa salle', async () => {
     const prospector = await createAgent('agent-prospecteur', AGENT_PERMISSIONS, 'prospecting');
     const analyst = await createAgent('agent-analyste', AGENT_PERMISSIONS, 'analysis');
-    const d = dossierOf(await call(prospector, 'post', '/api/agent/prospects', prospectBody()));
+    const d = dossierOf(
+      await call(prospector, 'post', '/api/agent/prospects', await prospectFor(prospector)),
+    );
     expectError(
       await call(analyst, 'post', `/api/agent/prospects/${d.prospect.id}/stage`, {
         to: 'analysis',
@@ -820,8 +955,12 @@ describe('missions', () => {
   it('un agent ne peut ni annuler, ni débloquer, ni toucher la mission d’un autre agent', async () => {
     const agent = await createAgent('agent-analyste');
     const other = await createAgent('agent-autre');
-    const d = dossierOf(await call(agent, 'post', '/api/agent/prospects', prospectBody()));
-    const mission = d.missions[0]!; // attribuée à agent-analyste
+    const input = createMissionRequestSchema.parse({
+      type: 'test.tache',
+      room: 'prospecting',
+      agentId: 'agent-analyste',
+    });
+    const { mission } = await missions.create(input, HUMAN_ACTOR); // attribuée à agent-analyste
     expectError(
       await call(agent, 'post', `/api/agent/missions/${mission.id}/transitions`, {
         action: 'cancel',
@@ -1006,6 +1145,13 @@ describe('attribution et visibilité des missions', () => {
   it('le dossier ne montre jamais les missions d’un autre agent', async () => {
     const prospector = await createAgent('agent-prospecteur');
     const d = await prospectInAnalysis(prospector);
+    const own = createMissionRequestSchema.parse({
+      type: 'test.tache',
+      room: 'prospecting',
+      agentId: 'agent-prospecteur',
+      prospectId: d.prospect.id,
+    });
+    await missions.create(own, HUMAN_ACTOR);
     const analysisMission = await openMissionIn(d.prospect.id, 'analysis');
     await createAgent('agent-analyste', AGENT_PERMISSIONS, 'analysis');
     await missions.applyAction(
@@ -1154,12 +1300,17 @@ describe('missions citées dans une analyse, une production ou une activité', (
     const d = await prospects.addAnalysis(prospectId, analysisBody(missionId), HUMAN_ACTOR);
     expect(d.analyses[0]).toMatchObject({ missionId, actorType: 'user' });
     // La vérification du dossier, elle, s'applique toujours à tous.
+    const otherCreator = await createAgent('agent-autre-createur');
     const other = dossierOf(
       await call(
-        await createAgent('agent-autre-createur'),
+        otherCreator,
         'post',
         '/api/agent/prospects',
-        prospectBody({ youtubeChannelId: 'UC-AUTRE', channelHandle: null, channelUrl: null }),
+        await prospectFor(otherCreator, {
+          youtubeChannelId: 'UC-AUTRE',
+          channelHandle: null,
+          channelUrl: null,
+        }),
       ),
     );
     await expect(
@@ -1171,7 +1322,9 @@ describe('missions citées dans une analyse, une production ou une activité', (
 describe('historique et contexte de travail', () => {
   it('ajoute une activité au nom de l’agent, sans pouvoir choisir son type', async () => {
     const agent = await createAgent('agent-analyste');
-    const d = dossierOf(await call(agent, 'post', '/api/agent/prospects', prospectBody()));
+    const d = dossierOf(
+      await call(agent, 'post', '/api/agent/prospects', await prospectFor(agent)),
+    );
     const res = await call(agent, 'post', `/api/agent/prospects/${d.prospect.id}/events`, {
       title: 'Statistiques relevées',
       details: '12 vidéos analysées',
@@ -1201,7 +1354,10 @@ describe('historique et contexte de travail', () => {
       ['prospects:read', 'prospects:create', 'stages:advance', 'analyses:write'],
       'analysis',
     );
-    const d = dossierOf(await call(agent, 'post', '/api/agent/prospects', prospectBody()));
+    const prospector = await createAgent('agent-prospecteur');
+    const d = dossierOf(
+      await call(prospector, 'post', '/api/agent/prospects', await prospectFor(prospector)),
+    );
     let ctx = agentProspectContextSchema.parse(
       (await call(agent, 'get', `/api/agent/prospects/${d.prospect.id}/context`).expect(200)).body,
     );

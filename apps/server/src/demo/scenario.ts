@@ -39,7 +39,6 @@ const AGENT_ROOMS: Record<keyof typeof AGENTS, RoomId> = {
   writer: 'email_review',
 };
 const OWNER: Actor = { type: 'user', id: 'owner' };
-const SYSTEM: Actor = { type: 'system', id: null };
 
 /** Horloge pilotée par le scénario (dates passées, jamais dans le futur). */
 function createScenarioClock(origin: number) {
@@ -277,22 +276,8 @@ export async function seedDemo(prisma: AppPrismaClient) {
       details: 'Analyse terminée : décision humaine requise.',
       mission: { type: PIPELINE_MISSION_TYPES.review, room: 'director', requiresValidation: true },
     });
-    const mission = openMission(reviewed, 'director');
-    clock.later(2);
-    await missions.applyAction(mission.id, { action: 'start' }, SYSTEM);
-    clock.later(1);
-    await missions.applyAction(
-      mission.id,
-      {
-        action: 'submit_for_validation',
-        output: {
-          analysisVersion: reviewed.analyses[0]?.version ?? 1,
-          score: reviewed.analyses[0]?.score ?? 0,
-        },
-      },
-      SYSTEM,
-    );
-    return prospects.getDossier(dossier.prospect.id);
+    // La mission de Mon bureau est soumise à l'utilisateur dès sa création, par le CRM.
+    return reviewed;
   }
 
   async function approve(dossier: ProspectDossier, daysAgo: number, reason?: string) {

@@ -188,7 +188,7 @@ describe('requêtes authentifiées par une clé d’agent', () => {
 
   it('l’agent ne peut prendre aucune décision sur un prospect ni sur un e-mail', async () => {
     const { apiKey } = await agentWithKey();
-    const d = await prospects.createProspect(baseProspect, pipelineAgent);
+    const d = await prospects.createProspect(baseProspect, { type: 'system', id: null });
     const id = d.prospect.id;
     const attempts: [string, string, Record<string, unknown>][] = [
       ['post', `/api/prospects/${id}/decisions`, { missionId: id, decision: 'approve' }],

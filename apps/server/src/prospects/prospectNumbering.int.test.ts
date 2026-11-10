@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import type { CreateProspectRequest } from '@agency/shared';
 import { AppError } from '../errors/AppError.ts';
 import { createMissionService, type Actor } from '../missions/missionService.ts';
+import { searchMissions } from '../test/searchMission.ts';
 import { createTestAgent, createTestPrisma, resetDatabase } from '../test/testDb.ts';
 import { createProspectService } from './prospectService.ts';
 
@@ -11,6 +12,14 @@ const agent: Actor = { type: 'agent', id: 'agent-prospecteur' };
 let now = new Date('2026-11-06T10:00:00.000Z');
 const missions = createMissionService(prisma, { clock: () => now });
 const service = createProspectService({ prisma, missions, simulationMode: true, clock: () => now });
+
+/** Mission de recherche en cours de l'agent : un agent ne crée un prospect que dans ce cadre. */
+const search = searchMissions(prisma, missions);
+async function createProspect(body: CreateProspectRequest, actor: Actor = agent) {
+  return service.createProspect(body, actor, {
+    searchMissionId: await search.of({ id: actor.id! }),
+  });
+}
 
 const prospect = (overrides: Partial<CreateProspectRequest> = {}): CreateProspectRequest => ({
   creatorName: 'Créateur',
@@ -38,6 +47,7 @@ async function settle(promises: Promise<{ prospect: { reference: string } }>[]) 
 beforeEach(async () => {
   now = new Date('2026-11-06T10:00:00.000Z');
   await resetDatabase();
+  search.forget();
   await createTestAgent(prisma, agent.id!);
 });
 
@@ -50,8 +60,7 @@ describe('numérotation des dossiers', () => {
     const refs = [];
     for (const n of [1, 2, 3]) {
       refs.push(
-        (await service.createProspect(prospect({ channelHandle: `@c${n}` }), agent)).prospect
-          .reference,
+        (await createProspect(prospect({ channelHandle: `@c${n}` }), agent)).prospect.reference,
       );
     }
     expect(refs).toEqual(['P-2026-0001', 'P-2026-0002', 'P-2026-0003']);
@@ -63,7 +72,7 @@ describe('numérotation des dossiers', () => {
       all.push(
         ...(await settle(
           Array.from({ length: 8 }, (_, k) =>
-            service.createProspect(prospect({ channelHandle: `@r${round}-c${k}` }), agent),
+            createProspect(prospect({ channelHandle: `@r${round}-c${k}` }), agent),
           ),
         )),
       );
@@ -74,9 +83,9 @@ describe('numérotation des dossiers', () => {
   });
 
   it('repart de zéro chaque année', async () => {
-    await service.createProspect(prospect({ channelHandle: '@a' }), agent);
+    await createProspect(prospect({ channelHandle: '@a' }), agent);
     now = new Date('2027-01-01T00:00:01.000Z');
-    const d = await service.createProspect(prospect({ channelHandle: '@b' }), agent);
+    const d = await createProspect(prospect({ channelHandle: '@b' }), agent);
     expect(d.prospect.reference).toBe('P-2027-0001');
   });
 
@@ -91,7 +100,7 @@ describe('numérotation des dossiers', () => {
         updatedAt: now,
       },
     });
-    const d = await service.createProspect(prospect({ channelHandle: '@nouveau' }), agent);
+    const d = await createProspect(prospect({ channelHandle: '@nouveau' }), agent);
     expect(d.prospect.reference).toBe('P-2026-0043');
     expect(await prisma.prospectCounter.findUnique({ where: { year: 2026 } })).toEqual({
       year: 2026,
@@ -121,11 +130,12 @@ describe('doublons lors de créations simultanées', () => {
   ])('%s, au milieu d’autres créations : un seul dossier', async (_label, variants) => {
     for (let round = 0; round < 3; round++) {
       await resetDatabase();
+      search.forget();
       await createTestAgent(prisma, agent.id!);
       const others = Array.from({ length: 5 }, (_, k) =>
-        service.createProspect(prospect({ channelHandle: `@autre-${k}` }), agent),
+        createProspect(prospect({ channelHandle: `@autre-${k}` }), agent),
       );
-      const same = variants.map((v) => service.createProspect(prospect(v), agent));
+      const same = variants.map((v) => createProspect(prospect(v), agent));
       const results = await settle([...same, ...others]);
       const forSame = results.slice(0, variants.length);
       expect(forSame.filter((r) => r.startsWith('P-'))).toHaveLength(1);
@@ -137,7 +147,7 @@ describe('doublons lors de créations simultanées', () => {
   });
 
   it('la base elle-même refuse deux dossiers avec la même clé', async () => {
-    const d = await service.createProspect(prospect({ channelHandle: '@lea' }), agent);
+    const d = await createProspect(prospect({ channelHandle: '@lea' }), agent);
     expect(d.prospect.channelHandle).toBe('@lea');
     // Écriture directe, sans passer par le service : refusée par l'index unique.
     await expect(
@@ -158,7 +168,7 @@ describe('doublons lors de créations simultanées', () => {
 
 describe('enrichissement et clés', () => {
   it('recalcule les clés quand le nom ou l’adresse change', async () => {
-    const d = await service.createProspect(prospect({ channelHandle: '@ancien' }), agent);
+    const d = await createProspect(prospect({ channelHandle: '@ancien' }), agent);
     await service.enrichProspect(
       d.prospect.id,
       { channelHandle: '@Nouveau', channelUrl: 'https://www.youtube.com/@Nouveau/' },
@@ -170,12 +180,12 @@ describe('enrichissement et clés', () => {
       channelUrlKey: 'youtube.com/@nouveau',
     });
     // L'ancien nom est libéré.
-    await service.createProspect(prospect({ channelHandle: '@ancien' }), agent);
+    await createProspect(prospect({ channelHandle: '@ancien' }), agent);
   });
 
   it('deux enrichissements simultanés vers le même nom : un seul passe', async () => {
-    const a = await service.createProspect(prospect({ channelHandle: '@a' }), agent);
-    const b = await service.createProspect(prospect({ channelHandle: '@b' }), agent);
+    const a = await createProspect(prospect({ channelHandle: '@a' }), agent);
+    const b = await createProspect(prospect({ channelHandle: '@b' }), agent);
     const results = await Promise.allSettled([
       service.enrichProspect(a.prospect.id, { channelHandle: '@cible' }, agent),
       service.enrichProspect(b.prospect.id, { channelHandle: '@cible' }, agent),
@@ -188,7 +198,7 @@ describe('enrichissement et clés', () => {
   });
 
   it('la recherche reconnaît les variantes d’adresse', async () => {
-    const d = await service.createProspect(
+    const d = await createProspect(
       prospect({ channelUrl: 'https://www.youtube.com/channel/UC123' }),
       agent,
     );

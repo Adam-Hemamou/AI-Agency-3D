@@ -1,6 +1,7 @@
 /**
  * Processus « serveur » interrompu, lancé par idempotency.int.test.ts.
  * Usage : node --import tsx interruptedWrite.ts <url-base> <agentId> <clé> <before-commit|after-commit>
+ *         <mission de recherche en cours de l'agent>
  *
  * - before-commit : la clé est posée dans la transaction, puis le processus s'arrête de lui-même
  *   au milieu (il attend indéfiniment) ; le test le tue avant la validation.
@@ -13,8 +14,14 @@ import { createIdempotencyStore } from '../../agents/idempotency.ts';
 import { createMissionService } from '../../missions/missionService.ts';
 import { createProspectService } from '../../prospects/prospectService.ts';
 
-const [url, agentId, key, mode] = process.argv.slice(2);
-if (!url || !agentId || !key || (mode !== 'before-commit' && mode !== 'after-commit')) {
+const [url, agentId, key, mode, searchMissionId] = process.argv.slice(2);
+if (
+  !url ||
+  !agentId ||
+  !key ||
+  !searchMissionId ||
+  (mode !== 'before-commit' && mode !== 'after-commit')
+) {
   console.error('arguments invalides');
   process.exit(1);
 }
@@ -42,7 +49,8 @@ await store.run(
     key,
     method: 'POST',
     path: '/api/agent/prospects',
-    body: INTERRUPTED_BODY,
+    // Corps HTTP tel que l'agent l'envoie (avec sa mission de recherche) : même empreinte.
+    body: { ...INTERRUPTED_BODY, missionId: searchMissionId },
     status: 201,
   },
   (hook) =>
@@ -50,6 +58,7 @@ await store.run(
       INTERRUPTED_BODY,
       { type: 'agent', id: agentId },
       {
+        searchMissionId,
         hook: {
           begin: async (tx) => {
             await hook.begin(tx);

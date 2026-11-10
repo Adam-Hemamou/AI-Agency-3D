@@ -20,6 +20,8 @@ import type { MissionService } from './missions/missionService.ts';
 import type { ProspectService } from './prospects/prospectService.ts';
 import type { AgentProfileService } from './agents/agentProfileService.ts';
 import type { RunService } from './agents/runService.ts';
+import type { CampaignService } from './campaigns/campaignService.ts';
+import { campaignsRouter } from './routes/campaigns.ts';
 import { agentApiRouter } from './routes/agentApi.ts';
 import { agentsRouter } from './routes/agents.ts';
 import { authRouter } from './routes/auth.ts';
@@ -39,6 +41,8 @@ export interface AppDeps {
   profiles?: AgentProfileService;
   /** Exécutions des agents (prise de mission). */
   runs?: RunService;
+  /** Campagnes de prospection et mémoire des chaînes écartées. */
+  campaigns?: CampaignService;
   /** Requêtes répétées des agents. Requis (avec agents et prospects) pour ouvrir /api/agent. */
   idempotency?: IdempotencyStore;
   /**
@@ -105,6 +109,7 @@ export function createApp(deps: AppDeps): Express {
   // Journal des exécutions des agents (utilisateur, lecture seule).
   if (deps.runs) app.use('/api/runs', runsRouter(deps.runs));
   if (deps.prospects) app.use('/api/prospects', prospectsRouter(deps.prospects));
+  if (deps.campaigns) app.use('/api/campaigns', campaignsRouter(deps.campaigns));
   if (deps.agents) {
     app.use(
       '/api/agents',
@@ -126,6 +131,8 @@ export function createApp(deps: AppDeps): Express {
         control: deps.agentControl,
         profiles: deps.profiles,
         runs: deps.runs,
+        simulationMode: deps.simulationMode,
+        campaigns: deps.campaigns,
       }),
     );
   }

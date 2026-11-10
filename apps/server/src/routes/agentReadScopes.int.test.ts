@@ -84,7 +84,8 @@ async function buildDossier(): Promise<ProspectDossier> {
         qualification: { targetFit: 'Oui', potentialInterest: 'Élevé', firstObservation: 'RAS' },
       },
     },
-    agent,
+    // Créé par le système : ce dossier sert à vérifier les lectures, pas la prospection.
+    { type: 'system', id: null },
   );
   const id = d.prospect.id;
   await prospects.advanceStage(id, { to: 'analysis' }, agent);
@@ -104,13 +105,7 @@ async function buildDossier(): Promise<ProspectDossier> {
     agent,
   );
   d = await prospects.advanceStage(id, { to: 'review' }, agent);
-  const review = open(d, 'director');
-  await missions.applyAction(review.id, { action: 'start' }, { type: 'system', id: null });
-  await missions.applyAction(
-    review.id,
-    { action: 'submit_for_validation' },
-    { type: 'system', id: null },
-  );
+  const review = open(d, 'director'); // soumise à l'utilisateur dès sa création
   await prospects.decideProspect(
     id,
     { missionId: review.id, decision: 'approve', reason: SECRETS.approval },

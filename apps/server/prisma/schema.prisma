@@ -53,11 +53,19 @@ model Mission {
   finishedAt         DateTime? @map("finished_at") @db.DateTime(3)
   /// Prospect concerné (dossier central). Null pour les missions sans prospect.
   prospectId         String?   @map("prospect_id") @db.Char(36)
+  /// Campagne à l'origine d'une mission de recherche (créée par le CRM), sinon null.
+  campaignId         String?   @map("campaign_id") @db.Char(36)
+  /// Jour de la mission de campagne (AAAA-MM-JJ, heure de Paris) : une seule par campagne et par jour.
+  campaignDay        String?   @map("campaign_day") @db.VarChar(10)
 
-  events   MissionEvent[]
-  runs     AgentRun[]
-  prospect Prospect?      @relation(fields: [prospectId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  events              MissionEvent[]
+  runs                AgentRun[]
+  prospect            Prospect?            @relation(fields: [prospectId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  campaign            ProspectingCampaign? @relation(fields: [campaignId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  discoveredProspects Prospect[]           @relation("DiscoveryMission")
+  rejectedChannels    RejectedChannel[]
 
+  @@unique([campaignId, campaignDay])
   @@index([status, priority])
   @@index([room, status])
   @@index([type])
@@ -111,6 +119,8 @@ model Agent {
   profile     AgentProfile?
   prompts     AgentPrompt[]
   runs        AgentRun[]
+  campaigns   ProspectingCampaign[]
+  rejections  RejectedChannel[]
 
   @@map("agents")
 }
@@ -315,6 +325,8 @@ model Prospect {
   doNotContactReason String?   @map("do_not_contact_reason") @db.VarChar(500)
   nextAction         String?   @map("next_action") @db.VarChar(500)
   nextActionAt       DateTime? @map("next_action_at") @db.DateTime(3)
+  /// Mission de recherche (search_creators) dans laquelle un agent l'a découvert, sinon null.
+  discoveryMissionId String?   @map("discovery_mission_id") @db.Char(36)
   /// Données fictives de démonstration.
   isDemo             Boolean   @default(false) @map("is_demo")
   version            Int       @default(0)
@@ -323,15 +335,17 @@ model Prospect {
   createdAt          DateTime  @default(now()) @map("created_at") @db.DateTime(3)
   updatedAt          DateTime  @updatedAt @map("updated_at") @db.DateTime(3)
 
-  missions    Mission[]
-  analyses    ProspectAnalysis[]
-  productions ProspectProduction[]
-  decisions   ProspectDecision[]
-  messages    ProspectMessage[]
-  events      ProspectEvent[]
+  missions         Mission[]
+  discoveryMission Mission?             @relation("DiscoveryMission", fields: [discoveryMissionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  analyses         ProspectAnalysis[]
+  productions      ProspectProduction[]
+  decisions        ProspectDecision[]
+  messages         ProspectMessage[]
+  events           ProspectEvent[]
 
   @@index([stage, priority])
   @@index([lastActivityAt])
+  @@index([discoveryMissionId])
   @@map("prospects")
 }
 
@@ -506,4 +520,83 @@ model AgentSwitch {
   updatedAt DateTime @map("updated_at") @db.DateTime(3)
 
   @@map("agent_switch")
+}
+
+// ---------------------------------------------------------------------------
+// Campagnes de prospection et mémoire des chaînes écartées.
+// Seul le service des campagnes écrit dans ces tables.
+// ---------------------------------------------------------------------------
+
+/// Ce que le Prospecteur recherche, défini par l'utilisateur. Chaque jour (heure de Paris), le CRM
+/// crée une mission de recherche par campagne active. Critères validés par createCampaignRequestSchema.
+model ProspectingCampaign {
+  id                    String   @id @default(uuid(7)) @db.Char(36)
+  name                  String   @unique @db.VarChar(120)
+  description           String?  @db.Text
+  /// false : aucune nouvelle mission ; les missions de recherche en attente sont annulées.
+  enabled               Boolean  @default(false)
+  /// Agent qui reçoit les missions (null : missions libres de la salle de prospection).
+  agentId               String?  @map("agent_id") @db.VarChar(64)
+  /// Thématiques (tableau de textes).
+  themes                Json
+  /// Mots-clés des recherches (tableau de textes, au moins un).
+  keywords              Json
+  /// Langues ISO 639-1 (tableau, vide : toutes).
+  languages             Json
+  /// Pays ISO 3166-1 alpha-2 (tableau, vide : tous).
+  countries             Json
+  minSubscribers        Int?     @map("min_subscribers")
+  maxSubscribers        Int?     @map("max_subscribers")
+  /// Activité récente : dernière vidéo publiée il y a au plus N jours.
+  maxDaysSinceLastVideo Int      @map("max_days_since_last_video")
+  /// Nouveaux prospects au plus par mission quotidienne.
+  dailyTarget           Int      @map("daily_target")
+  /// Délai avant réévaluation d'une chaîne écartée (jours).
+  reevaluationDays      Int      @map("reevaluation_days")
+  priority              Int      @default(3) @db.TinyInt
+  /// Incrémentée à chaque modification : protège contre les modifications concurrentes.
+  version               Int      @default(0)
+  createdAt             DateTime @map("created_at") @db.DateTime(3)
+  updatedAt             DateTime @map("updated_at") @db.DateTime(3)
+  updatedBy             String   @map("updated_by") @db.VarChar(64)
+
+  agent            Agent?            @relation(fields: [agentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  missions         Mission[]
+  rejectedChannels RejectedChannel[]
+
+  @@index([enabled])
+  @@map("prospecting_campaigns")
+}
+
+/// Chaîne écartée par le Prospecteur pour une campagne. Une ligne par chaîne et par campagne :
+/// un nouveau rejet la met à jour (motif, date, compteur, date de réévaluation).
+model RejectedChannel {
+  id              String   @id @default(uuid(7)) @db.Char(36)
+  /// CHANNEL_PLATFORMS (« youtube »).
+  platform        String   @db.VarChar(16)
+  /// Identifiant de la chaîne sur la plateforme (YouTube : « UC… »).
+  channelId       String   @map("channel_id") @db.VarChar(64)
+  channelTitle    String?  @map("channel_title") @db.VarChar(160)
+  campaignId      String   @map("campaign_id") @db.Char(36)
+  /// Mission de recherche du dernier rejet.
+  missionId       String   @map("mission_id") @db.Char(36)
+  /// Agent auteur du dernier rejet.
+  agentId         String   @map("agent_id") @db.VarChar(64)
+  /// REJECTION_REASON_CODES.
+  reasonCode      String   @map("reason_code") @db.VarChar(32)
+  reason          String?  @db.VarChar(500)
+  rejectionCount  Int      @default(1) @map("rejection_count")
+  firstRejectedAt DateTime @map("first_rejected_at") @db.DateTime(3)
+  rejectedAt      DateTime @map("rejected_at") @db.DateTime(3)
+  /// Avant cette date, la chaîne n'est pas réévaluée pour cette campagne.
+  reevaluateAfter DateTime @map("reevaluate_after") @db.DateTime(3)
+
+  campaign ProspectingCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  mission  Mission             @relation(fields: [missionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  agent    Agent               @relation(fields: [agentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([platform, channelId, campaignId])
+  @@index([campaignId, reevaluateAfter])
+  @@index([missionId])
+  @@map("rejected_channels")
 }

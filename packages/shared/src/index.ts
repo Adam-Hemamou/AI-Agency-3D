@@ -14,3 +14,6 @@ export * from './auth';
 export * from './agentLimits';
 export * from './agentProfiles';
 export * from './agentRuns';
+export * from './externalActions';
+export * from './agentSchemas';
+export * from './campaigns';
